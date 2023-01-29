@@ -1,7 +1,7 @@
 # iosmic
 
 A CLI utility to use iOS device as an external mic on Linux.
-This codebase is mostly compiled from [droidcam](https://github.com/dev47apps/droidcam), [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) and [obs-studio](https://github.com/obsproject/obs-studio).
+This codebase is forked from [droidcam](https://github.com/dev47apps/droidcam) and additionally mostly compiled [droidcam-obs-plugin](https://github.com/dev47apps/droidcam-obs-plugin) and [obs-studio](https://github.com/obsproject/obs-studio).
 
 ## Requirements
 
