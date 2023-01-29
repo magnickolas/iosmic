@@ -5,6 +5,9 @@ project(iosmic
 file(GLOB SOURCES "src/*.cc")
 add_executable(iosmic ${SOURCES})
 target_compile_features(iosmic PRIVATE cxx_std_20)
+target_compile_options(
+  iosmic PRIVATE
+  -Wall -Wextra -pedantic)
 
 target_link_libraries(iosmic PRIVATE
   asound
@@ -13,9 +16,3 @@ target_link_libraries(iosmic PRIVATE
   avutil
   swresample)
 target_include_directories(iosmic PRIVATE include)
-target_compile_features(
-  iosmic PRIVATE
-  cxx_std_17)
-target_compile_options(
-  iosmic PRIVATE
-  -Wall -Wextra -pedantic -O2)
