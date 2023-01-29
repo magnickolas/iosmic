@@ -1,3 +1,4 @@
+#include "ios_socket.h"
 #include <cstdio>
 #include <iostream>
 extern "C" {
@@ -10,6 +11,7 @@ extern "C" {
 #include "common.h"
 #include "connection.h"
 #include "ffmpeg_decode.h"
+#include "ios_socket.h"
 #include "loopback.h"
 #include "net.h"
 #include "plugin.h"
@@ -22,7 +24,6 @@ extern "C" {
 struct ctx_t {
   std::unique_ptr<audio_resampler_t, decltype(&audio_resampler_destroy)>
       resampler;
-  socket_t sock = INVALID_SOCKET;
   std::unique_ptr<Decoder> decoder;
   AVFrame *frame;
   std::vector<AlsaLoopback> loopbacks;
@@ -33,11 +34,6 @@ struct ctx_t {
     for (auto &loopback : loopbacks) {
       this->loopbacks.emplace_back(std::move(loopback));
     }
-  }
-
-  ~ctx_t() {
-    if (sock != INVALID_SOCKET)
-      net_close(sock);
   }
 };
 
@@ -148,12 +144,12 @@ static void play_audio_to_pipe(ctx_t &ctx) {
   /* fclose(debf); */
 }
 
-static bool do_audio_frame(ctx_t &ctx) {
+static bool do_audio_frame(ctx_t &ctx, const IOSSocket &sock) {
   FFMpegDecoder *decoder = (FFMpegDecoder *)ctx.decoder.get();
 
   int has_config = 0;
   bool got_output;
-  DataPacket *data_packet = read_frame(decoder, ctx.sock, &has_config);
+  DataPacket *data_packet = read_frame(decoder, sock.get(), &has_config);
   if (!data_packet)
     return false;
 
@@ -196,9 +192,7 @@ static bool do_audio_frame(ctx_t &ctx) {
   return true;
 }
 
-void *run_audio_thread(void *arg) {
-  (void)arg;
-  const char *audio_req = AUDIO_REQ;
+void *run_audio_thread(void *) {
 
   ctx_t ctx{{"hw:0"}};
   struct resample_info src_info;
@@ -215,19 +209,16 @@ void *run_audio_thread(void *arg) {
 
   ctx.decoder.reset(new FFMpegDecoder());
 
-  if ((ctx.sock = get_connection()) == INVALID_SOCKET) {
-    elog("audio: get_connection failed");
-    return nullptr;
-  }
+  IOSSocket sock{g_settings.ip, g_settings.port, g_settings.connection};
 
-  if (net_send_all(ctx.sock, audio_req, CSTR_LEN(AUDIO_REQ)) <= 0) {
+  if (net_send_all(sock.get(), AUDIO_REQ, CSTR_LEN(AUDIO_REQ)) <= 0) {
     elog("send(/audio) failed");
     return nullptr;
   }
 
   printf("audio_thread start\n");
   while (a_running) {
-    if (!do_audio_frame(ctx)) {
+    if (!do_audio_frame(ctx, sock)) {
       break;
     }
   }
