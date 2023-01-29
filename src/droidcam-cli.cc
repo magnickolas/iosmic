@@ -12,7 +12,7 @@
 #include "common.h"
 #include "connection.h"
 /* #include "decoder.h" */
-#include "plugin.h"
+#include "audio.h"
 #include "settings.h"
 
 void sig_handler(__attribute__((__unused__)) int sig) {

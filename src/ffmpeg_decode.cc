@@ -1,25 +1,7 @@
-/*
-        Copyright (C) 2014 by Hugh Bailey <obs.jim@gmail.com>
-        Copyright (C) 2021 DEV47APPS, github.com/dev47apps
-
-        This program is free software: you can redistribute it and/or modify
-        it under the terms of the GNU General Public License as published by
-        the Free Software Foundation, either version 2 of the License, or
-        (at your option) any later version.
-
-        This program is distributed in the hope that it will be useful,
-        but WITHOUT ANY WARRANTY; without even the implied warranty of
-        MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-        GNU General Public License for more details.
-
-        You should have received a copy of the GNU General Public License
-        along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
-
 #include "ffmpeg_decode.h"
-#include "plugin.h"
+#include "common.h"
+#include "audio.h"
 #include <libavutil/channel_layout.h>
-#include <obs/obs-ffmpeg-compat.h>
 
 int FFMpegDecoder::init(uint8_t *header, enum AVCodecID id) {
   int ret;
@@ -76,11 +58,8 @@ int FFMpegDecoder::init(uint8_t *header, enum AVCodecID id) {
     return ret;
   }
 
-  // if (codec->capabilities & CODEC_CAP_TRUNC)
-  // 	decoder->flags |= CODEC_FLAG_TRUNC;
   decoder->flags |= AV_CODEC_FLAG_LOW_DELAY;
   decoder->flags2 |= AV_CODEC_FLAG2_FAST;
-  // decoder->flags2 |= AV_CODEC_FLAG2_CHUNKS;
   decoder->thread_type = FF_THREAD_SLICE;
 
   frame = av_frame_alloc();
@@ -95,7 +74,7 @@ int FFMpegDecoder::init(uint8_t *header, enum AVCodecID id) {
   return 0;
 }
 
-FFMpegDecoder::~FFMpegDecoder(void) {
+FFMpegDecoder::~FFMpegDecoder() {
   if (frame)
     av_frame_free(&frame);
 
@@ -106,53 +85,8 @@ FFMpegDecoder::~FFMpegDecoder(void) {
     avcodec_free_context(&decoder);
 }
 
-static inline enum audio_format convert_sample_format(int f) {
-  switch (f) {
-  case AV_SAMPLE_FMT_S16:
-    return AUDIO_FORMAT_16BIT;
-  case AV_SAMPLE_FMT_S32:
-    return AUDIO_FORMAT_32BIT;
-  case AV_SAMPLE_FMT_U8:
-    return AUDIO_FORMAT_U8BIT;
-  case AV_SAMPLE_FMT_FLT:
-    return AUDIO_FORMAT_FLOAT;
-  case AV_SAMPLE_FMT_U8P:
-    return AUDIO_FORMAT_U8BIT_PLANAR;
-  case AV_SAMPLE_FMT_S16P:
-    return AUDIO_FORMAT_16BIT_PLANAR;
-  case AV_SAMPLE_FMT_S32P:
-    return AUDIO_FORMAT_32BIT_PLANAR;
-  case AV_SAMPLE_FMT_FLTP:
-    return AUDIO_FORMAT_FLOAT_PLANAR;
-  default:;
-  }
-
-  return AUDIO_FORMAT_UNKNOWN;
-}
-
-static inline enum speaker_layout convert_speaker_layout(int channels) {
-  switch (channels) {
-  case 1:
-    return SPEAKERS_MONO;
-  case 2:
-    return SPEAKERS_STEREO;
-  case 3:
-    return SPEAKERS_2POINT1;
-  case 4:
-    return SPEAKERS_4POINT0;
-  case 5:
-    return SPEAKERS_4POINT1;
-  case 6:
-    return SPEAKERS_5POINT1;
-  case 8:
-    return SPEAKERS_7POINT1;
-  default:
-    return SPEAKERS_UNKNOWN;
-  }
-}
-
 DataPacket *FFMpegDecoder::pull_empty_packet(size_t size) {
-  size_t new_size = size + INPUT_BUFFER_PADDING_SIZE;
+  size_t new_size = size + AV_INPUT_BUFFER_PADDING_SIZE;
   DataPacket *packet = Decoder::pull_empty_packet(new_size);
   memset(packet->data, 0, new_size);
   return packet;
@@ -185,12 +119,8 @@ void FFMpegDecoder::push_ready_packet(DataPacket *packet) {
 
   if (codec->id == AV_CODEC_ID_H264 && decodeQueue.items.size() > 25) {
     catchup = true;
-  }
-  // ((uint64_t)plugin->obs_audio_frame.frames * MILLI_SEC /
-  // (uint64_t)plugin->obs_audio_frame.samples_per_sec) At 44100HZ, 1 AAC Frame
-  // = 23ms
-  else if (codec->id == AV_CODEC_ID_AAC &&
-           decodeQueue.items.size() > (1000 / 23)) {
+  } else if (codec->id == AV_CODEC_ID_AAC &&
+             decodeQueue.items.size() > (1000 / 23)) {
     catchup = true;
   }
 }

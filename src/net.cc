@@ -16,28 +16,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "net.h"
-#include "plugin.h"
-#include <errno.h>
-#include <string.h>
-
-#ifdef _WIN32
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-typedef int socklen_t;
-#else
+#include "common.h"
+#include "audio.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-#endif
 
 bool set_nonblock(socket_t sock, int nonblock) {
-#ifdef _WIN32
-  u_long nb = nonblock;
-  return (NO_ERROR == ioctlsocket(sock, FIONBIO, &nb));
-#else
   int flags = fcntl(sock, F_GETFL, NULL);
   if (flags < 0) {
     elog("fcntl(): %s", strerror(errno));
@@ -55,18 +45,12 @@ bool set_nonblock(socket_t sock, int nonblock) {
   }
 
   return true;
-#endif
 }
 
-// https://stackoverflow.com/a/2939145
 int set_recv_timeout(socket_t sock, int tv_sec) {
-#if _WIN32
-  DWORD timeout = tv_sec * 1000;
-#else
   struct timeval timeout;
   timeout.tv_sec = tv_sec;
   timeout.tv_usec = 0;
-#endif
 
   return setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout,
                     sizeof(timeout));
@@ -87,9 +71,6 @@ socket_t net_listen(const char *addr, uint16_t port) {
 
   const int on = 1;
   setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char *)&on, sizeof(int));
-#if _WIN32
-  setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char *)&on, sizeof(int));
-#endif
   set_nonblock(sock, on);
 
   if (bind(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
@@ -172,16 +153,11 @@ socket_t net_connect(struct addrinfo *addr, uint16_t port) {
 
   connect(sock, addr->ai_addr, addr->ai_addrlen);
 
-#if _WIN32
-  if (WSAGetLastError() != WSAEWOULDBLOCK)
-    goto ERROR_OUT;
-#else
   if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINPROGRESS) {
     WSAErrno();
     elog("connect(): %s", strerror(errno));
     goto ERROR_OUT;
   }
-#endif
 
   if (select(sock + 1, NULL, &set, NULL, &timeout) <= 0) {
     WSAErrno();
@@ -228,11 +204,7 @@ socket_t net_connect(const char *host, uint16_t port) {
 }
 
 int net_recv(socket_t sock, void *buf, size_t len) {
-#if _WIN32
-  return recv(sock, (char *)buf, len, 0);
-#else
   return recv(sock, buf, len, 0);
-#endif
 }
 
 int net_recv_peek(socket_t sock) {
@@ -241,19 +213,11 @@ int net_recv_peek(socket_t sock) {
 }
 
 int net_recv_all(socket_t sock, void *buf, size_t len) {
-#if _WIN32
-  return recv(sock, (char *)buf, len, MSG_WAITALL);
-#else
   return recv(sock, buf, len, MSG_WAITALL);
-#endif
 }
 
 int net_send(socket_t sock, const void *buf, size_t len) {
-#if _WIN32
-  return send(sock, (const char *)buf, len, 0);
-#else
   return send(sock, buf, len, 0);
-#endif
 }
 
 int net_send_all(socket_t sock, const void *buf, size_t len) {
@@ -272,27 +236,9 @@ int net_send_all(socket_t sock, const void *buf, size_t len) {
 
 bool net_close(socket_t sock) {
   shutdown(sock, SHUT_RDWR);
-#ifdef _WIN32
-  return !closesocket(sock);
-#else
   return !close(sock);
-#endif
 }
 
-bool net_init(void) {
-#ifdef _WIN32
-  WSADATA wsa;
-  int res = WSAStartup(MAKEWORD(2, 2), &wsa) < 0;
-  if (res < 0) {
-    elog("WSAStartup failed with error %d", res);
-    return false;
-  }
-#endif
-  return true;
-}
+bool net_init(void) { return true; }
 
-void net_cleanup(void) {
-#ifdef _WIN32
-  WSACleanup();
-#endif
-}
+void net_cleanup(void) {}

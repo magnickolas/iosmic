@@ -25,5 +25,10 @@ void ShowError(const char *, const char *);
 #define TRUE 1
 #endif
 
+#define xlog(log_level, format, ...) printf(log_level format, ##__VA_ARGS__)
+#define ilog(format, ...) xlog("INFO", format, ##__VA_ARGS__)
+#define elog(format, ...) xlog("WARNING", format, ##__VA_ARGS__)
+#define dlog(format, ...) xlog("DEBUG", format, ##__VA_ARGS__)
+
 inline int a_running = 1;
 inline struct settings g_settings;

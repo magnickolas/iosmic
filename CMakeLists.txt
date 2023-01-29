@@ -4,6 +4,7 @@ project(droidcam
 )
 file(GLOB SOURCES "src/*.cc")
 add_executable(droidcam ${SOURCES})
+target_compile_features(droidcam PRIVATE cxx_std_20)
 
 target_link_libraries(droidcam PRIVATE
   asound

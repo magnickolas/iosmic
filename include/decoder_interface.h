@@ -1,15 +1,9 @@
 #pragma once
 
+#include "common.h"
 #include <cstdint>
 #include <mutex>
-#include <obs/media-io/media-io-defs.h>
 #include <vector>
-
-#define xlog(log_level, format, ...)                                           \
-  blog(log_level, "[DroidCamOBS] " format, ##__VA_ARGS__)
-
-#define ilog(format, ...) xlog(LOG_INFO, format, ##__VA_ARGS__)
-#define elog(format, ...) xlog(LOG_WARNING, format, ##__VA_ARGS__)
 
 template <typename T> struct Queue {
   std::mutex items_lock;
@@ -47,12 +41,12 @@ struct DataPacket {
 
   ~DataPacket(void) {
     if (data)
-      bfree(data);
+      free(data);
   }
 
   void resize(size_t new_size) {
     if (size < new_size) {
-      data = (uint8_t *)brealloc(data, new_size);
+      data = (uint8_t *)realloc(data, new_size);
       size = new_size;
     }
   }

@@ -4,14 +4,6 @@
 extern "C" {
 #endif
 
-#include <obs/obs.h>
-
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#pragma warning(disable : 4204)
-#endif
-
 #include <libavcodec/avcodec.h>
 
 #ifdef _MSC_VER
@@ -25,22 +17,14 @@ extern "C" {
 #include "decoder_interface.h"
 
 struct FFMpegDecoder : Decoder {
-  const AVCodec *codec;
-  AVCodecContext *decoder;
-  AVPacket *packet;
-  AVFrame *frame;
-  bool catchup;
-  bool b_frame_check;
+  const AVCodec *codec = nullptr;
+  AVCodecContext *decoder = nullptr;
+  AVPacket *packet = nullptr;
+  AVFrame *frame = nullptr;
+  bool catchup = false;
+  bool b_frame_check = false;
 
-  FFMpegDecoder(void) {
-    decoder = NULL;
-    packet = NULL;
-    frame = NULL;
-    catchup = false;
-    b_frame_check = false;
-  }
-
-  ~FFMpegDecoder(void);
+  ~FFMpegDecoder();
 
   int init(uint8_t *header, enum AVCodecID id);
 
