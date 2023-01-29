@@ -11,8 +11,7 @@ target_link_libraries(iosmic PRIVATE
   usbmuxd-2.0
   avcodec
   avutil
-  swresample
-  obs)
+  swresample)
 target_include_directories(iosmic PRIVATE include)
 target_compile_features(
   iosmic PRIVATE
