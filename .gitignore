@@ -1,4 +1,5 @@
-droidcam*
-
-# vim swap files
-*.swp
+.cache/
+*.mp3
+/build/
+.gdb_history
+.nvimrc.lua
