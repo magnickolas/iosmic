@@ -30,7 +30,7 @@ static inline void usage(const char *name) {
           " %s <ip> <port>\n"
           "   Connect via ip\n"
           "\n"
-          " %s [options] ios <port>\n"
+          " %s [options] usb <port>\n"
           "   Connect via usbmuxd to iDevice\n"
           "\n",
           name, name);
@@ -41,7 +41,7 @@ static void parse_args(int argc, char *argv[]) {
     g_settings.ip = argv[1];
     g_settings.port = strtoul(argv[2], NULL, 10);
 
-    if (g_settings.ip == "ios") {
+    if (g_settings.ip == "usb") {
       g_settings.connection = radios::CB_RADIO_IOS;
     } else {
       printf("ip %s\n", g_settings.ip.c_str());
