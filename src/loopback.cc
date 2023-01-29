@@ -19,7 +19,7 @@ AlsaLoopback::AlsaLoopback(std::string &&device, int _rate, int _nchannels,
   }
   if ((err = snd_pcm_set_params(playback_handle, _format,
                                 SND_PCM_ACCESS_RW_INTERLEAVED, _nchannels,
-                                _rate, 0, 50000)) < 0) {
+                                _rate, 0, 500000)) < 0) {
     throw std::runtime_error("cannot set audio parameters (" +
                              std::string(snd_strerror(err)) + ")");
   }
