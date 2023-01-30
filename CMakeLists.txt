@@ -7,7 +7,7 @@ add_executable(iosmic ${SOURCES})
 target_compile_features(iosmic PRIVATE cxx_std_20)
 target_compile_options(
   iosmic PRIVATE
-  -Wall -Wextra -pedantic)
+  -Wall -Wextra -Wno-missing-field-initializers -pedantic)
 
 target_link_libraries(iosmic PRIVATE
   asound
