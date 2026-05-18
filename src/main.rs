@@ -5,13 +5,21 @@ mod policy;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
+use connection::Stream;
 use policy::PlayPolicy;
+use std::time::Duration;
 
 #[derive(Parser)]
-#[command(about = "Stream iOS microphone audio to an ALSA playback device")]
+#[command(
+    about = "Stream iOS microphone audio to an ALSA playback device",
+    args_conflicts_with_subcommands = true
+)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    #[command(flatten)]
+    run: RunArgs,
 }
 
 #[derive(Args, Clone)]
@@ -22,28 +30,29 @@ struct ConnArgs {
     /// Port number
     #[arg(short = 'P', long, default_value_t = 4747)]
     port: u16,
+}
+
+#[derive(Args, Clone)]
+struct RunArgs {
+    #[command(flatten)]
+    conn: ConnArgs,
     /// ALSA playback device to write to
     #[arg(short = 'D', long, default_value = "default")]
     device: String,
+    /// Pre-fill buffer size in milliseconds
+    #[arg(short, long, default_value_t = 2000)]
+    buffer: u32,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Pre-fill buffer, then play everything in order (for recording)
-    Record {
+    /// Measure packet jitter
+    Measure {
         #[command(flatten)]
         conn: ConnArgs,
-        /// Pre-fill buffer size in milliseconds
-        #[arg(short, long, default_value_t = 2000)]
-        buffer: u32,
-    },
-    /// Drop frames when latency exceeds target
-    Drop {
-        #[command(flatten)]
-        conn: ConnArgs,
-        /// Max delay in milliseconds before dropping frames
-        #[arg(short, long, default_value_t = 300)]
-        delay: u32,
+        /// Measurement duration in seconds
+        #[arg(short, long, default_value_t = 30)]
+        seconds: u64,
     },
 }
 
@@ -51,33 +60,44 @@ enum Command {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let (conn, play_policy) = match cli.command {
-        Command::Record { conn, buffer } => (conn, PlayPolicy::Record { buffer_ms: buffer }),
-        Command::Drop { conn, delay } => (
-            conn,
-            PlayPolicy::Drop {
-                max_delay_ms: delay,
-            },
-        ),
-    };
-
-    let device = conn.device.clone();
-    let host = conn.host.clone();
-    let port = conn.port;
-
-    tokio::select! {
-        result = async {
-            let stream = if let Some(host) = &host {
-                connection::connect_wifi(host, port).await?
-            } else {
-                connection::connect_usb(port).await?
+    match cli.command {
+        Some(Command::Measure { conn, seconds }) => {
+            anyhow::ensure!(seconds > 0, "--seconds must be greater than zero");
+            let duration = Duration::from_secs(seconds);
+            tokio::select! {
+                result = async {
+                    let stream = connect(&conn).await?;
+                    emitter::measure(stream, duration).await
+                } => result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    Ok(())
+                }
+            }
+        }
+        None => {
+            let play_policy = PlayPolicy::Record {
+                buffer_ms: cli.run.buffer,
             };
 
-            emitter::run(stream, play_policy, &device).await
-        } => result,
-        signal = tokio::signal::ctrl_c() => {
-            signal?;
-            Ok(())
+            tokio::select! {
+                result = async {
+                    let stream = connect(&cli.run.conn).await?;
+                    emitter::run(stream, play_policy, &cli.run.device).await
+                } => result,
+                signal = tokio::signal::ctrl_c() => {
+                    signal?;
+                    Ok(())
+                }
+            }
         }
+    }
+}
+
+async fn connect(conn: &ConnArgs) -> Result<Stream> {
+    if let Some(host) = &conn.host {
+        connection::connect_wifi(host, conn.port).await
+    } else {
+        connection::connect_usb(conn.port).await
     }
 }

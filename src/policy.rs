@@ -4,14 +4,12 @@ use anyhow::{Context, Result};
 #[derive(Clone)]
 pub enum PlayPolicy {
     Record { buffer_ms: u32 },
-    Drop { max_delay_ms: u32 },
 }
 
 impl PlayPolicy {
     pub fn buffer_us(&self) -> u32 {
         match self {
             Self::Record { buffer_ms } => buffer_ms * 1000,
-            Self::Drop { max_delay_ms } => max_delay_ms * 2 * 1000,
         }
     }
 }
@@ -21,9 +19,6 @@ pub enum PolicyState {
         prefill_buf: Vec<i32>,
         prefilled: bool,
         buffer_samples: u32,
-    },
-    Drop {
-        max_delay_samples: i64,
     },
 }
 
@@ -35,9 +30,6 @@ impl PolicyState {
                 prefill_buf: Vec::new(),
                 prefilled: false,
                 buffer_samples: ms_to_samples(*buffer_ms),
-            },
-            PlayPolicy::Drop { max_delay_ms } => Self::Drop {
-                max_delay_samples: ms_to_samples(*max_delay_ms) as i64,
             },
         }
     }
@@ -53,16 +45,10 @@ impl PolicyState {
                     prefill_buf.extend_from_slice(samples);
                     if prefill_buf.len() >= *buffer_samples as usize {
                         write_pcm(pcm, prefill_buf)?;
-                        prefill_buf.clear();
+                        std::mem::take(prefill_buf);
                         *prefilled = true;
                     }
                 } else {
-                    write_pcm(pcm, samples)?;
-                }
-            }
-            Self::Drop { max_delay_samples } => {
-                let delay = pcm_delay(pcm);
-                if delay < *max_delay_samples {
                     write_pcm(pcm, samples)?;
                 }
             }
@@ -73,10 +59,6 @@ impl PolicyState {
 }
 
 pub fn delay_samples(pcm: &PCM) -> i64 {
-    pcm_delay(pcm)
-}
-
-fn pcm_delay(pcm: &PCM) -> i64 {
     pcm.delay().unwrap_or(0)
 }
 
