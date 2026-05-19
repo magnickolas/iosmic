@@ -3,6 +3,7 @@ use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
 use byteorder::{BigEndian, ByteOrder};
 use std::env;
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
@@ -25,8 +26,21 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
     let mut pts_debug = PtsDebug::from_env();
     let mut timing_debug = TimingDebug::from_env();
 
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+
     loop {
-        let frame = read_frame(&mut stream).await?;
+        let frame = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut stream)).await {
+            Ok(Ok(frame)) => frame,
+            Ok(Err(e)) if is_eof(&e) => {
+                eprintln!("Stream ended");
+                return Ok(());
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                eprintln!("Warning: no data received for {}s", IDLE_TIMEOUT.as_secs());
+                continue;
+            }
+        };
         let (pts, audio_data) = match frame {
             Frame::Config(config) => {
                 decoder = Some(AacDecoder::new(&config)?);
@@ -153,6 +167,7 @@ impl MeasureStats {
         let p50 = percentile(&self.positive_drift_ms, 0.50);
         let p95 = percentile(&self.positive_drift_ms, 0.95);
         let p99 = percentile(&self.positive_drift_ms, 0.99);
+        let p999 = percentile(&self.positive_drift_ms, 0.999);
         let measured = duration.saturating_sub(warmup);
 
         println!("total_seconds={:.1}", duration.as_secs_f64());
@@ -162,6 +177,7 @@ impl MeasureStats {
         println!("positive_drift_p50_ms={p50:.3}");
         println!("positive_drift_p95_ms={p95:.3}");
         println!("positive_drift_p99_ms={p99:.3}");
+        println!("positive_drift_p999_ms={p999:.3}");
         println!("positive_drift_max_ms={:.3}", self.max_drift_ms);
 
         Ok(())
@@ -228,17 +244,13 @@ impl TimingDebug {
 }
 
 fn f32_to_s32_mono(samples: &[f32], channels: usize) -> Vec<i32> {
-    let frames = samples.len() / channels;
-    let mut out = Vec::with_capacity(frames);
-    for i in 0..frames {
-        let mut sum = 0.0f32;
-        for ch in 0..channels {
-            sum += samples[i * channels + ch];
-        }
-        sum /= channels as f32;
-        out.push((sum * i32::MAX as f32) as i32);
-    }
-    out
+    samples
+        .chunks_exact(channels)
+        .map(|frame| {
+            let avg = frame.iter().sum::<f32>() / channels as f32;
+            (avg * i32::MAX as f32) as i32
+        })
+        .collect()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -364,6 +376,11 @@ impl PtsDebug {
         self.prev_pts = Some(pts);
         self.prev_decoded_frames = Some(decoded_frames);
     }
+}
+
+fn is_eof(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == ErrorKind::UnexpectedEof)
 }
 
 #[cfg(test)]

@@ -24,8 +24,8 @@ Options:
   -h, --help           Print help
 
 Examples:
-  scripts/iosmic-source -- --buffer 5
-  scripts/iosmic-source --source-name phone_mic -- --host 192.168.0.114 --buffer 5
+  scripts/iosmic-source -- --buffer 50
+  scripts/iosmic-source --source-name iPhoneMic -- --host 192.168.0.114 --buffer 50
 EOF
 }
 

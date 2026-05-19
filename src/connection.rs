@@ -68,6 +68,13 @@ pub async fn connect_usb(port: u16) -> Result<Stream> {
         .context("Failed to list devices")?;
 
     let device = devices.first().context("No iOS device found")?;
+    if devices.len() > 1 {
+        eprintln!(
+            "Warning: {} devices connected, using {}",
+            devices.len(),
+            device.udid
+        );
+    }
     eprintln!("Found device: {}", device.udid);
 
     let idevice = muxd

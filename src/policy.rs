@@ -2,58 +2,43 @@ use alsa::pcm::PCM;
 use anyhow::{Context, Result};
 
 #[derive(Clone)]
-pub enum PlayPolicy {
-    Record { buffer_ms: u32 },
+pub struct PlayPolicy {
+    pub buffer_ms: u32,
 }
 
 impl PlayPolicy {
     pub fn buffer_us(&self) -> u32 {
-        match self {
-            Self::Record { buffer_ms } => buffer_ms * 1000,
-        }
+        self.buffer_ms * 1000
     }
 }
 
-pub enum PolicyState {
-    Record {
-        prefill_buf: Vec<i32>,
-        prefilled: bool,
-        buffer_samples: u32,
-    },
+pub struct PolicyState {
+    prefill_buf: Vec<i32>,
+    prefilled: bool,
+    buffer_samples: u32,
 }
 
 impl PolicyState {
     pub fn new(policy: &PlayPolicy, sample_rate: u32) -> Self {
-        let ms_to_samples = |ms: u32| (sample_rate as u64 * ms as u64 / 1000) as u32;
-        match policy {
-            PlayPolicy::Record { buffer_ms } => Self::Record {
-                prefill_buf: Vec::new(),
-                prefilled: false,
-                buffer_samples: ms_to_samples(*buffer_ms),
-            },
+        let buffer_samples = (sample_rate as u64 * policy.buffer_ms as u64 / 1000) as u32;
+        Self {
+            prefill_buf: Vec::new(),
+            prefilled: false,
+            buffer_samples,
         }
     }
 
     pub fn write(&mut self, pcm: &PCM, samples: &[i32]) -> Result<()> {
-        match self {
-            Self::Record {
-                prefill_buf,
-                prefilled,
-                buffer_samples,
-            } => {
-                if !*prefilled {
-                    prefill_buf.extend_from_slice(samples);
-                    if prefill_buf.len() >= *buffer_samples as usize {
-                        write_pcm(pcm, prefill_buf)?;
-                        std::mem::take(prefill_buf);
-                        *prefilled = true;
-                    }
-                } else {
-                    write_pcm(pcm, samples)?;
-                }
+        if !self.prefilled {
+            self.prefill_buf.extend_from_slice(samples);
+            if self.prefill_buf.len() >= self.buffer_samples as usize {
+                write_pcm(pcm, &self.prefill_buf)?;
+                self.prefill_buf = Vec::new();
+                self.prefilled = true;
             }
+        } else {
+            write_pcm(pcm, samples)?;
         }
-
         Ok(())
     }
 }

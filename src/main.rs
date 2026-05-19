@@ -40,7 +40,7 @@ struct RunArgs {
     #[arg(short = 'D', long, default_value = "default")]
     device: String,
     /// Pre-fill buffer size in milliseconds
-    #[arg(short, long, default_value_t = 2000)]
+    #[arg(short, long, default_value_t = 100)]
     buffer: u32,
 }
 
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
             }
         }
         None => {
-            let play_policy = PlayPolicy::Record {
+            let play_policy = PlayPolicy {
                 buffer_ms: cli.run.buffer,
             };
 
