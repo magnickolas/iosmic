@@ -98,6 +98,13 @@ async fn connect(conn: &ConnArgs) -> Result<Stream> {
     if let Some(host) = &conn.host {
         connection::connect_wifi(host, conn.port).await
     } else {
-        connection::connect_usb(conn.port).await
+        #[cfg(feature = "usb")]
+        {
+            connection::connect_usb(conn.port).await
+        }
+        #[cfg(not(feature = "usb"))]
+        {
+            anyhow::bail!("USB support not compiled in (enable the `usb` feature)")
+        }
     }
 }
