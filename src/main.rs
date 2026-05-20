@@ -42,9 +42,12 @@ struct RunArgs {
     /// ALSA playback device to write to
     #[arg(short = 'D', long, default_value = "default")]
     device: String,
-    /// Pre-fill buffer size in milliseconds (default: 20 for USB, 100 for WiFi)
+    /// Pre-fill buffer size in milliseconds (default: 50 for USB, 100 for WiFi)
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(50..=500))]
     buffer: Option<u32>,
+    /// Drop audio when ALSA delay exceeds buffer * this multiplier
+    #[arg(long, default_value_t = 5)]
+    drop_mult: u32,
 }
 
 #[derive(Subcommand)]
@@ -82,6 +85,7 @@ async fn main() -> Result<()> {
             let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
             let play_policy = PlayPolicy {
                 buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
+                drop_mult: cli.run.drop_mult,
             };
 
             loop {
@@ -99,7 +103,14 @@ async fn main() -> Result<()> {
                     Ok(()) => return Ok(()),
                     Err(e) => {
                         eprintln!("Disconnected: {e:#}");
-                        eprintln!("Reconnecting...");
+                        eprintln!("Reconnecting in 1s...");
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                            signal = tokio::signal::ctrl_c() => {
+                                signal?;
+                                return Ok(());
+                            }
+                        }
                     }
                 }
             }
