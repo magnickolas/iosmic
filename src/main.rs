@@ -4,6 +4,7 @@ mod decode;
 mod emitter;
 mod measure;
 mod policy;
+mod resample;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
@@ -42,7 +43,7 @@ struct RunArgs {
     #[arg(short = 'D', long, default_value = "default")]
     device: String,
     /// Pre-fill buffer size in milliseconds (default: 20 for USB, 100 for WiFi)
-    #[arg(short, long)]
+    #[arg(short, long, value_parser = clap::value_parser!(u32).range(50..=500))]
     buffer: Option<u32>,
 }
 
@@ -78,19 +79,28 @@ async fn main() -> Result<()> {
             }
         }
         None => {
-            let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 20 };
+            let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
             let play_policy = PlayPolicy {
                 buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
             };
 
-            tokio::select! {
-                result = async {
-                    let stream = connect(&cli.run.conn).await?;
-                    emitter::run(stream, play_policy, &cli.run.device).await
-                } => result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    Ok(())
+            loop {
+                let result = tokio::select! {
+                    result = async {
+                        let stream = connect(&cli.run.conn).await?;
+                        emitter::run(stream, play_policy.clone(), &cli.run.device).await
+                    } => result,
+                    signal = tokio::signal::ctrl_c() => {
+                        signal?;
+                        return Ok(());
+                    }
+                };
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        eprintln!("Disconnected: {e:#}");
+                        eprintln!("Reconnecting...");
+                    }
                 }
             }
         }

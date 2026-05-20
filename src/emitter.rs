@@ -36,8 +36,7 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
             }
             Ok(Err(e)) => return Err(e),
             Err(_) => {
-                eprintln!("Warning: no data received for {}s", IDLE_TIMEOUT.as_secs());
-                continue;
+                anyhow::bail!("No data received for {}s", IDLE_TIMEOUT.as_secs());
             }
         };
         let (pts, audio_data) = match frame {
@@ -51,14 +50,15 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
         if pcm.is_none() {
             let dec = decoder.as_ref().context("No decoder")?;
             let buffer_us = policy.buffer_us();
+            let alsa_buffer_us = buffer_us;
             eprintln!(
                 "input {}Hz {}ch, buffer {}ms",
                 dec.sample_rate(),
                 dec.channels(),
                 buffer_us / 1000
             );
-            pcm = Some(open_pcm(sink_device, dec.sample_rate(), buffer_us)?);
-            state = Some(PolicyState::new(&policy, dec.sample_rate()));
+            pcm = Some(open_pcm(sink_device, dec.sample_rate(), alsa_buffer_us)?);
+            state = Some(PolicyState::new(&policy, dec.sample_rate(), 1024)?);
         }
 
         let dec = decoder.as_mut().context("Got audio data before config")?;
@@ -71,7 +71,7 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
             continue;
         };
 
-        let out = f32_to_s32_mono(&samples, dec.channels());
+        let out = downmix_mono(&samples, dec.channels());
         if !out.is_empty() {
             timing_debug.log(pts, out.len(), dec.sample_rate(), delay_samples(p));
             st.write(p, &out)?;
@@ -81,13 +81,10 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
 
 
 
-fn f32_to_s32_mono(samples: &[f32], channels: usize) -> Vec<i32> {
+fn downmix_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     samples
         .chunks_exact(channels)
-        .map(|frame| {
-            let avg = frame.iter().sum::<f32>() / channels as f32;
-            (avg * i32::MAX as f32) as i32
-        })
+        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect()
 }
 
