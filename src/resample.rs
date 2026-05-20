@@ -6,7 +6,9 @@ pub struct AdaptiveResampler {
     resampler: Async<f32>,
     out_buf: Vec<f32>,
     target_delay: f64,
-    gain: f64,
+    kp: f64,
+    ki: f64,
+    integral: f64,
 }
 
 impl AdaptiveResampler {
@@ -28,19 +30,22 @@ impl AdaptiveResampler {
             resampler,
             out_buf,
             target_delay: target_delay_samples as f64,
-            gain: 1e-5,
+            kp: 1e-5,
+            ki: 1e-8,
+            integral: 0.0,
         })
     }
 
     pub fn process(&mut self, input: &[f32], alsa_delay: i64) -> &[f32] {
         let error = alsa_delay as f64 - self.target_delay;
-        let ratio = (1.0 - self.gain * error).clamp(0.9, 1.1);
+        self.integral = (self.integral + error).clamp(-1e6, 1e6);
+        let ratio = (1.0 - self.kp * error - self.ki * self.integral).clamp(1.0 / 1.1, 1.1);
         let _ = self.resampler.set_resample_ratio(ratio, true);
 
         if std::env::var_os("IOSMIC_RESAMPLE_DEBUG").is_some() {
             eprintln!(
-                "resample delay={} target={:.0} error={:.1} ratio={:.6}",
-                alsa_delay, self.target_delay, error, ratio
+                "resample delay={} target={:.0} error={:.1} integral={:.0} ratio={:.6}",
+                alsa_delay, self.target_delay, error, self.integral, ratio
             );
         }
 
