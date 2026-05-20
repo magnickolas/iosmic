@@ -1,6 +1,8 @@
 mod connection;
+mod debug;
 mod decode;
 mod emitter;
+mod measure;
 mod policy;
 
 use anyhow::Result;
@@ -39,9 +41,9 @@ struct RunArgs {
     /// ALSA playback device to write to
     #[arg(short = 'D', long, default_value = "default")]
     device: String,
-    /// Pre-fill buffer size in milliseconds
-    #[arg(short, long, default_value_t = 100)]
-    buffer: u32,
+    /// Pre-fill buffer size in milliseconds (default: 20 for USB, 100 for WiFi)
+    #[arg(short, long)]
+    buffer: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -67,7 +69,7 @@ async fn main() -> Result<()> {
             tokio::select! {
                 result = async {
                     let stream = connect(&conn).await?;
-                    emitter::measure(stream, duration).await
+                    measure::measure(stream, duration).await
                 } => result,
                 signal = tokio::signal::ctrl_c() => {
                     signal?;
@@ -76,8 +78,9 @@ async fn main() -> Result<()> {
             }
         }
         None => {
+            let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 20 };
             let play_policy = PlayPolicy {
-                buffer_ms: cli.run.buffer,
+                buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
             };
 
             tokio::select! {
