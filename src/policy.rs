@@ -6,7 +6,6 @@ use crate::resample::AdaptiveResampler;
 #[derive(Clone)]
 pub struct PlayPolicy {
     pub buffer_ms: u32,
-    pub drop_mult: u32,
 }
 
 impl PlayPolicy {
@@ -19,7 +18,6 @@ pub struct PolicyState {
     prefill_buf: Vec<f32>,
     prefilled: bool,
     buffer_samples: u32,
-    drop_mult: u32,
     resampler: AdaptiveResampler,
 }
 
@@ -31,7 +29,6 @@ impl PolicyState {
             prefill_buf: Vec::new(),
             prefilled: false,
             buffer_samples,
-            drop_mult: policy.drop_mult,
             resampler,
         })
     }
@@ -47,9 +44,6 @@ impl PolicyState {
             }
         } else {
             let delay = delay_samples(pcm);
-            if self.drop_mult > 0 && delay > self.buffer_samples as i64 * self.drop_mult as i64 {
-                return Ok(());
-            }
             let resampled = self.resampler.process(samples, delay);
             let s32: Vec<i32> = resampled.iter().map(|&s| f32_to_s32(s)).collect();
             write_pcm(pcm, &s32)?;
