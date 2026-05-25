@@ -2,6 +2,7 @@ use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
 
+#[cfg_attr(test, mockall::automock)]
 pub trait AudioSink {
     fn write(&mut self, samples: &[i32]) -> Result<()>;
     fn delay_samples(&self) -> i64;
@@ -67,5 +68,26 @@ impl AudioSink for AlsaSink {
 
     fn delay_samples(&self) -> i64 {
         self.pcm.delay().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioSink, MockAudioSink};
+
+    #[test]
+    fn mock_sink_blanket_impl_delegates() {
+        let mut mock = MockAudioSink::new();
+        mock.expect_write()
+            .times(1)
+            .returning(|_| Ok(()));
+        mock.expect_delay_samples()
+            .times(1)
+            .returning(|| 42);
+
+        let mut boxed: Box<dyn AudioSink> = Box::new(mock);
+
+        assert!(boxed.write(&[1, 2, 3]).is_ok());
+        assert_eq!(boxed.delay_samples(), 42);
     }
 }

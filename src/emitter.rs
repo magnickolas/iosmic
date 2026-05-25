@@ -56,7 +56,7 @@ where
     }
 }
 
-async fn handshake<S, F>(
+pub(crate) async fn handshake<S, F>(
     stream: &mut S,
     policy: &PlayPolicy,
     open_sink: F,
@@ -91,7 +91,7 @@ where
     }
 }
 
-fn downmix_mono(samples: &[f32], channels: usize) -> Vec<f32> {
+pub(crate) fn downmix_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     if channels == 1 {
         return samples.to_vec();
     }
@@ -165,8 +165,11 @@ fn is_eof(err: &anyhow::Error) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, NO_PTS, read_frame};
+    use super::{Frame, NO_PTS, downmix_mono, handshake, read_frame};
     use byteorder::{BigEndian, ByteOrder};
+    use crate::policy::PlayPolicy;
+    use crate::sink::{AudioSink, MockAudioSink};
+    use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
     fn header(pts: u64, len: u32) -> [u8; 12] {
@@ -197,6 +200,89 @@ mod tests {
                 pts: 7,
                 data: vec![1, 2, 3],
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn read_frame_stop_signal_is_rejected() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&header(NO_PTS, u32::MAX)).await.unwrap();
+        drop(writer);
+
+        let result = read_frame(&mut reader).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Stop/error from app side"),
+            "expected 'Stop/error from app side' in error"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_frame_config_zero_length_is_rejected() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&header(NO_PTS, 0)).await.unwrap();
+        drop(writer);
+
+        let result = read_frame(&mut reader).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Config packet size invalid"),
+            "expected 'Config packet size invalid' in error"
+        );
+    }
+
+    #[test]
+    fn downmix_mono_passthrough_for_single_channel() {
+        let input = [0.1f32, 0.2, 0.3];
+        let output = downmix_mono(&input, 1);
+        assert_eq!(output, input.to_vec());
+    }
+
+    #[test]
+    fn downmix_mono_averages_stereo_frames() {
+        let input = [1.0f32, 0.0, 0.0, 1.0];
+        let output = downmix_mono(&input, 2);
+        assert_eq!(output, vec![0.5f32, 0.5]);
+    }
+
+    #[tokio::test]
+    async fn handshake_succeeds_with_valid_config_frame() {
+        let (mut reader, mut writer) = tokio::io::duplex(64);
+        writer.write_all(&header(NO_PTS, 2)).await.unwrap();
+        writer.write_all(&[0x12, 0x10]).await.unwrap();
+        drop(writer);
+
+        let policy = PlayPolicy { buffer_ms: 50, latency_reconnect_ms: 0 };
+        let open_sink = |_sample_rate: u32| -> anyhow::Result<Box<dyn AudioSink>> {
+            Ok(Box::new(MockAudioSink::new()))
+        };
+        let (decoder, _state, _timing_debug) =
+            handshake(&mut reader, &policy, open_sink).await.unwrap();
+
+        assert_eq!(decoder.sample_rate(), 44100);
+        assert_eq!(decoder.channels(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handshake_times_out_when_no_data() {
+        let (mut reader, _writer) = tokio::io::duplex(64);
+        let policy = PlayPolicy { buffer_ms: 50, latency_reconnect_ms: 0 };
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            handshake(
+                &mut reader,
+                &policy,
+                |_: u32| -> anyhow::Result<Box<dyn AudioSink>> {
+                    panic!("should not open sink")
+                },
+            ),
+        )
+        .await
+        .expect("outer timeout should not fire");
+        assert!(result.is_err());
+        assert!(
+            result.err().unwrap().to_string().contains("No config received"),
+            "expected 'No config received' in error"
         );
     }
 }

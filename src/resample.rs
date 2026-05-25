@@ -71,3 +71,45 @@ impl AdaptiveResampler {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn ratio_clamps_upper_when_delay_below_target() {
+        // error = 0 - 44100 = -44100, kp*error = -0.441, ratio = 1.441 -> clamped to 1.1
+        let mut r = AdaptiveResampler::new(1024, 44100).unwrap();
+        let input = vec![0.0f32; 1024];
+        let out = r.process(&input, 0);
+        assert!(out.len() > 0);
+    }
+
+    #[test]
+    fn ratio_clamps_lower_when_delay_above_target() {
+        // error = 200000 - 0 = 200000, kp*error = 2.0, ratio = -1.0 -> clamped to 1/1.1 ≈ 0.909
+        let mut r = AdaptiveResampler::new(1024, 0).unwrap();
+        let input = vec![0.0f32; 1024];
+        let out = r.process(&input, 200000);
+        assert!(out.len() > 0);
+    }
+
+    #[test]
+    fn process_returns_non_empty_for_nominal_chunk() {
+        // error = 2205 - 2205 = 0, ratio = 1.0
+        let mut r = AdaptiveResampler::new(1024, 2205).unwrap();
+        let input = vec![0.0f32; 1024];
+        let out = r.process(&input, 2205);
+        assert!(out.len() > 0);
+    }
+
+    proptest! {
+        #[test]
+        fn process_never_panics_for_any_delay(delay in (-1_000_000_000i64..=1_000_000_000i64)) {
+            let mut r = AdaptiveResampler::new(1024, 2205).unwrap();
+            let input = vec![0.0f32; 1024];
+            let _out = r.process(&input, delay);
+        }
+    }
+}

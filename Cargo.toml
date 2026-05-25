@@ -18,6 +18,14 @@ rubato = "3.0.0"
 symphonia = { version = "0.6", default-features = false, features = ["aac"] }
 tokio = { version = "1", features = ["full"] }
 
+[dev-dependencies.tokio]
+version = "1"
+features = ["full", "test-util"]
+
+[dev-dependencies]
+mockall = "0.14"
+proptest = "1"
+
 [profile.release]
 codegen-units = 1
 lto = true
