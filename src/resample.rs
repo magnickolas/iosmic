@@ -61,10 +61,11 @@ impl AdaptiveResampler {
             active_channels_mask: None,
         };
 
-        match self
-            .resampler
-            .process_into_buffer(&input_adapter, &mut output_adapter, Some(&indexing))
-        {
+        match self.resampler.process_into_buffer(
+            &input_adapter,
+            &mut output_adapter,
+            Some(&indexing),
+        ) {
             Ok((_, written)) => &self.out_buf[..written],
             Err(_) => &[],
         }

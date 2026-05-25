@@ -2,25 +2,18 @@ mod connection;
 mod debug;
 mod decode;
 mod emitter;
-mod measure;
 mod policy;
 mod resample;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 use connection::Stream;
 use policy::PlayPolicy;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(
-    about = "Stream iOS microphone audio to an ALSA playback device",
-    args_conflicts_with_subcommands = true
-)]
+#[command(about = "Stream iOS microphone audio to an ALSA playback device")]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
-
     #[command(flatten)]
     run: RunArgs,
 }
@@ -47,66 +40,36 @@ struct RunArgs {
     buffer: Option<u32>,
 }
 
-#[derive(Subcommand)]
-enum Command {
-    /// Measure packet jitter
-    Measure {
-        #[command(flatten)]
-        conn: ConnArgs,
-        /// Measurement duration in seconds
-        #[arg(short, long, default_value_t = 30)]
-        seconds: u64,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Command::Measure { conn, seconds }) => {
-            anyhow::ensure!(seconds > 0, "--seconds must be greater than zero");
-            let duration = Duration::from_secs(seconds);
-            tokio::select! {
-                result = async {
-                    let stream = connect(&conn).await?;
-                    measure::measure(stream, duration).await
-                } => result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal?;
-                    Ok(())
-                }
-            }
-        }
-        None => {
-            let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
-            let play_policy = PlayPolicy {
-                buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
-            };
+    let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
+    let play_policy = PlayPolicy {
+        buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
+    };
 
-            loop {
-                let result = tokio::select! {
-                    result = async {
-                        let stream = connect(&cli.run.conn).await?;
-                        emitter::run(stream, play_policy.clone(), &cli.run.device).await
-                    } => result,
+    loop {
+        let result = tokio::select! {
+            result = async {
+                let stream = connect(&cli.run.conn).await?;
+                emitter::run(stream, play_policy.clone(), &cli.run.device).await
+            } => result,
+            signal = tokio::signal::ctrl_c() => {
+                signal?;
+                return Ok(());
+            }
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("Disconnected: {e:#}");
+                eprintln!("Reconnecting in 1s...");
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     signal = tokio::signal::ctrl_c() => {
                         signal?;
                         return Ok(());
-                    }
-                };
-                match result {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        eprintln!("Disconnected: {e:#}");
-                        eprintln!("Reconnecting in 1s...");
-                        tokio::select! {
-                            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                            signal = tokio::signal::ctrl_c() => {
-                                signal?;
-                                return Ok(());
-                            }
-                        }
                     }
                 }
             }

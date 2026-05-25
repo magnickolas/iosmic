@@ -18,7 +18,13 @@ impl TimingDebug {
         }
     }
 
-    pub fn log(&mut self, pts: u64, decoded_frames: usize, sample_rate: u32, alsa_delay_samples: i64) {
+    pub fn log(
+        &mut self,
+        pts: u64,
+        decoded_frames: usize,
+        sample_rate: u32,
+        alsa_delay_samples: i64,
+    ) {
         if !self.enabled {
             return;
         }

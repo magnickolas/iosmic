@@ -79,8 +79,6 @@ pub async fn run(mut stream: Stream, policy: PlayPolicy, sink_device: &str) -> R
     }
 }
 
-
-
 fn downmix_mono(samples: &[f32], channels: usize) -> Vec<f32> {
     samples
         .chunks_exact(channels)
@@ -162,7 +160,6 @@ fn open_pcm(device: &str, rate: u32, latency_us: u32) -> Result<PCM> {
     pcm.prepare().context("PCM prepare failed")?;
     Ok(pcm)
 }
-
 
 fn is_eof(err: &anyhow::Error) -> bool {
     err.downcast_ref::<std::io::Error>()
