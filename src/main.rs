@@ -4,11 +4,13 @@ mod decode;
 mod emitter;
 mod policy;
 mod resample;
+mod sink;
 
 use anyhow::Result;
 use clap::{Args, Parser};
 use connection::Stream;
 use policy::PlayPolicy;
+use sink::{AlsaSink, AudioSink};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -57,7 +59,12 @@ async fn main() -> Result<()> {
         let result = tokio::select! {
             result = async {
                 let stream = connect(&cli.run.conn).await?;
-                emitter::run(stream, play_policy.clone(), &cli.run.device).await
+                let device = cli.run.device.clone();
+                let buffer_us = play_policy.buffer_us();
+                emitter::run(stream, play_policy.clone(), move |sample_rate| {
+                    Ok(Box::new(AlsaSink::open(&device, sample_rate, buffer_us)?)
+                        as Box<dyn AudioSink>)
+                }).await
             } => result,
             signal = tokio::signal::ctrl_c() => {
                 signal?;
