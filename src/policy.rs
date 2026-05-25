@@ -6,6 +6,7 @@ use crate::resample::AdaptiveResampler;
 #[derive(Clone)]
 pub struct PlayPolicy {
     pub buffer_ms: u32,
+    pub latency_reconnect_ms: u32,
 }
 
 impl PlayPolicy {
@@ -18,17 +19,21 @@ pub struct PolicyState {
     prefill_buf: Vec<f32>,
     prefilled: bool,
     buffer_samples: u32,
+    latency_reconnect_samples: i64,
     resampler: AdaptiveResampler,
 }
 
 impl PolicyState {
     pub fn new(policy: &PlayPolicy, sample_rate: u32, chunk_size: usize) -> Result<Self> {
         let buffer_samples = (sample_rate as u64 * policy.buffer_ms as u64 / 1000) as u32;
+        let latency_reconnect_samples =
+            (sample_rate as u64 * policy.latency_reconnect_ms as u64 / 1000) as i64;
         let resampler = AdaptiveResampler::new(chunk_size, buffer_samples)?;
         Ok(Self {
             prefill_buf: Vec::new(),
             prefilled: false,
             buffer_samples,
+            latency_reconnect_samples,
             resampler,
         })
     }
@@ -44,6 +49,9 @@ impl PolicyState {
             }
         } else {
             let delay = delay_samples(pcm);
+            if self.latency_reconnect_samples > 0 && delay > self.latency_reconnect_samples {
+                anyhow::bail!("Latency {delay} samples exceeds reconnect threshold");
+            }
             let resampled = self.resampler.process(samples, delay);
             let s32: Vec<i32> = resampled.iter().map(|&s| f32_to_s32(s)).collect();
             write_pcm(pcm, &s32)?;

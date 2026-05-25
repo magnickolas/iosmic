@@ -38,6 +38,9 @@ struct RunArgs {
     /// Pre-fill buffer size in milliseconds (default: 50 for USB, 100 for WiFi)
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(50..=500))]
     buffer: Option<u32>,
+    /// Reconnect when latency exceeds this many milliseconds (0 = disabled)
+    #[arg(long, default_value_t = 0)]
+    latency_reconnect_threshold: u32,
 }
 
 #[tokio::main]
@@ -47,6 +50,7 @@ async fn main() -> Result<()> {
     let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
     let play_policy = PlayPolicy {
         buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
+        latency_reconnect_ms: cli.run.latency_reconnect_threshold,
     };
 
     loop {
