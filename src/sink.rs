@@ -78,12 +78,8 @@ mod tests {
     #[test]
     fn mock_sink_blanket_impl_delegates() {
         let mut mock = MockAudioSink::new();
-        mock.expect_write()
-            .times(1)
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples()
-            .times(1)
-            .returning(|| 42);
+        mock.expect_write().times(1).returning(|_| Ok(()));
+        mock.expect_delay_samples().times(1).returning(|| 42);
 
         let mut boxed: Box<dyn AudioSink> = Box::new(mock);
 

@@ -166,9 +166,9 @@ fn is_eof(err: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{Frame, NO_PTS, downmix_mono, handshake, read_frame};
-    use byteorder::{BigEndian, ByteOrder};
     use crate::policy::PlayPolicy;
     use crate::sink::{AudioSink, MockAudioSink};
+    use byteorder::{BigEndian, ByteOrder};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
@@ -212,7 +212,10 @@ mod tests {
         let result = read_frame(&mut reader).await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Stop/error from app side"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Stop/error from app side"),
             "expected 'Stop/error from app side' in error"
         );
     }
@@ -226,7 +229,10 @@ mod tests {
         let result = read_frame(&mut reader).await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Config packet size invalid"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Config packet size invalid"),
             "expected 'Config packet size invalid' in error"
         );
     }
@@ -252,7 +258,10 @@ mod tests {
         writer.write_all(&[0x12, 0x10]).await.unwrap();
         drop(writer);
 
-        let policy = PlayPolicy { buffer_ms: 50, latency_reconnect_ms: 0 };
+        let policy = PlayPolicy {
+            buffer_ms: 50,
+            latency_reconnect_ms: 0,
+        };
         let open_sink = |_sample_rate: u32| -> anyhow::Result<Box<dyn AudioSink>> {
             Ok(Box::new(MockAudioSink::new()))
         };
@@ -266,22 +275,27 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn handshake_times_out_when_no_data() {
         let (mut reader, _writer) = tokio::io::duplex(64);
-        let policy = PlayPolicy { buffer_ms: 50, latency_reconnect_ms: 0 };
+        let policy = PlayPolicy {
+            buffer_ms: 50,
+            latency_reconnect_ms: 0,
+        };
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             handshake(
                 &mut reader,
                 &policy,
-                |_: u32| -> anyhow::Result<Box<dyn AudioSink>> {
-                    panic!("should not open sink")
-                },
+                |_: u32| -> anyhow::Result<Box<dyn AudioSink>> { panic!("should not open sink") },
             ),
         )
         .await
         .expect("outer timeout should not fire");
         assert!(result.is_err());
         assert!(
-            result.err().unwrap().to_string().contains("No config received"),
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("No config received"),
             "expected 'No config received' in error"
         );
     }
