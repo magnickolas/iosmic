@@ -1,6 +1,20 @@
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
 use anyhow::{Context, Result};
+use std::fmt;
+
+#[derive(Debug)]
+pub struct MissingPulsePlugin;
+
+impl fmt::Display for MissingPulsePlugin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "ALSA's `pulse` PCM device is unavailable. Install the ALSA plugins package that provides the `pulse` plugin, then verify it with `aplay -L | grep -x pulse`. See README.md for package commands.",
+        )
+    }
+}
+
+impl std::error::Error for MissingPulsePlugin {}
 
 #[cfg_attr(test, mockall::automock)]
 pub trait AudioSink {
@@ -23,8 +37,13 @@ pub struct AlsaSink {
 
 impl AlsaSink {
     pub fn open(device: &str, rate: u32, buffer_us: u32) -> Result<Self> {
-        let pcm =
-            PCM::new(device, Direction::Playback, false).context("Failed to open ALSA device")?;
+        let pcm = match PCM::new(device, Direction::Playback, false) {
+            Ok(pcm) => pcm,
+            Err(error) if is_missing_pulse_plugin(device, error.errno()) => {
+                return Err(MissingPulsePlugin.into());
+            }
+            Err(error) => return Err(error).context("Failed to open ALSA device"),
+        };
 
         {
             let hwp = HwParams::any(&pcm)?;
@@ -40,6 +59,10 @@ impl AlsaSink {
         pcm.prepare().context("PCM prepare failed")?;
         Ok(Self { pcm })
     }
+}
+
+fn is_missing_pulse_plugin(device: &str, errno: i32) -> bool {
+    device == "pulse" && errno == libc::ENOENT
 }
 
 impl AudioSink for AlsaSink {
@@ -73,7 +96,7 @@ impl AudioSink for AlsaSink {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioSink, MockAudioSink};
+    use super::{AudioSink, MockAudioSink, is_missing_pulse_plugin};
 
     #[test]
     fn mock_sink_blanket_impl_delegates() {
@@ -85,5 +108,12 @@ mod tests {
 
         assert!(boxed.write(&[1, 2, 3]).is_ok());
         assert_eq!(boxed.delay_samples(), 42);
+    }
+
+    #[test]
+    fn recognizes_a_missing_pulse_plugin() {
+        assert!(is_missing_pulse_plugin("pulse", libc::ENOENT));
+        assert!(!is_missing_pulse_plugin("default", libc::ENOENT));
+        assert!(!is_missing_pulse_plugin("pulse", libc::EPIPE));
     }
 }

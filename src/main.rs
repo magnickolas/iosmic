@@ -11,7 +11,7 @@ use anyhow::Result;
 use clap::{Args, Parser};
 use connection::Stream;
 use policy::PlayPolicy;
-use sink::{AlsaSink, AudioSink};
+use sink::{AlsaSink, AudioSink, MissingPulsePlugin};
 use std::time::Duration;
 use virtual_source::VirtualSource;
 
@@ -100,6 +100,9 @@ async fn main() -> Result<()> {
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
+                if e.is::<MissingPulsePlugin>() {
+                    return Err(e);
+                }
                 eprintln!("Disconnected: {e:#}");
                 eprintln!("Reconnecting in 1s...");
                 tokio::select! {

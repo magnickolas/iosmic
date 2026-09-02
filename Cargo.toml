@@ -1,6 +1,6 @@
 [package]
 name = "iosmic"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Expose iOS microphone audio to Linux applications"
 license = "GPL-3.0-or-later"
