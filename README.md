@@ -23,14 +23,13 @@ Turn your iOS device into a microphone for Linux.
 ## Install
 
 ```sh
-git clone https://github.com/magnickolas/iosmic
-cargo install --path iosmic
+cargo install iosmic
 ```
 
 For Wi-Fi only, omit USB support:
 
 ```sh
-cargo install --path iosmic --no-default-features
+cargo install iosmic --no-default-features
 ```
 
 ## Basic Usage
