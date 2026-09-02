@@ -57,7 +57,7 @@ impl<S: AudioSink> PolicyState<S> {
         if self.latency_reconnect_samples > 0 && delay > self.latency_reconnect_samples {
             anyhow::bail!("Latency {delay} samples exceeds reconnect threshold");
         }
-        let resampled = self.resampler.process(samples, delay);
+        let resampled = self.resampler.process(samples, delay)?;
         let s32: Vec<i32> = resampled.iter().map(|&s| f32_to_s32(s)).collect();
         self.sink.write(&s32)?;
         Ok(delay)

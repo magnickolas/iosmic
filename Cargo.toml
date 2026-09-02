@@ -2,20 +2,24 @@
 name = "iosmic"
 version = "0.1.0"
 edition = "2024"
+description = "Expose iOS microphone audio to Linux applications"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/magnickolas/iosmic"
+readme = "README.md"
 
 [features]
 default = ["usb"]
 usb = ["dep:idevice"]
 
 [dependencies]
-alsa = "0.11"
+alsa = "0.12"
 anyhow = "1"
 byteorder = "1"
 clap = { version = "4", features = ["derive"] }
 idevice = { version = "0.1", features = ["usbmuxd"], optional = true }
 libc = "0.2"
 libpulse-binding = "2.30"
-rubato = "3.0.0"
+rubato = "5.0.0"
 symphonia = { version = "0.6", default-features = false, features = ["aac"] }
 tokio = { version = "1", features = ["full"] }
 
@@ -24,7 +28,7 @@ version = "1"
 features = ["full", "test-util"]
 
 [dev-dependencies]
-mockall = "0.14"
+mockall = "0.15"
 proptest = "1"
 
 [profile.release]
