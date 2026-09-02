@@ -1,0 +1,14 @@
+[package]
+name = "iosmic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+alsa = "0.11"
+anyhow = "1"
+byteorder = "1"
+clap = { version = "4", features = ["derive"] }
+idevice = { version = "0.1", features = ["usbmuxd"] }
+libc = "0.2"
+symphonia = { version = "0.6", default-features = false, features = ["aac"] }
+tokio = { version = "1", features = ["full"] }

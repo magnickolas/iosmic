@@ -1,0 +1,11 @@
+.cache/
+*.mp3
+/build/
+.gdb_history
+.nvimrc.lua
+build.sh
+
+
+# Added by cargo
+
+/target
