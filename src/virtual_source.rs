@@ -23,7 +23,7 @@ impl VirtualSource {
         source_description: Option<&str>,
     ) -> Result<Self> {
         validate_name("source", source_name)?;
-        let source_description = source_description.unwrap_or("iOS Mic");
+        let source_description = source_description.unwrap_or("iOS Microphone");
         validate_description(source_description)?;
         let sink_name = sink_name
             .map(ToOwned::to_owned)

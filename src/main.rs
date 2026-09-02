@@ -16,7 +16,10 @@ use std::time::Duration;
 use virtual_source::VirtualSource;
 
 #[derive(Parser)]
-#[command(about = "Stream iOS microphone audio to an ALSA playback device")]
+#[command(
+    about = "Expose iOS microphone audio to Linux applications",
+    after_help = "Repository: https://github.com/magnickolas/iosmic"
+)]
 struct Cli {
     #[command(flatten)]
     run: RunArgs,
@@ -36,17 +39,17 @@ struct ConnArgs {
 struct RunArgs {
     #[command(flatten)]
     conn: ConnArgs,
-    /// ALSA playback device to write to
+    /// Write directly to an ALSA playback device instead of creating a microphone source
     #[arg(short = 'D', long)]
     device: Option<String>,
-    /// Expose the stream as a temporary PulseAudio/PipeWire microphone source
-    #[arg(long, value_name = "NAME")]
+    /// Internal PulseAudio/PipeWire microphone source name (default: iosmic)
+    #[arg(long, conflicts_with = "device", value_name = "NAME")]
     source_name: Option<String>,
-    /// Human-readable microphone label shown in applications (default: iOS Mic)
-    #[arg(long, requires = "source_name", value_name = "TEXT")]
+    /// Human-readable microphone label shown in applications (default: iOS Microphone)
+    #[arg(long, conflicts_with = "device", value_name = "TEXT")]
     source_description: Option<String>,
     /// Backing PulseAudio/PipeWire sink name (default: <source-name>_sink)
-    #[arg(long, requires = "source_name", value_name = "NAME")]
+    #[arg(long, conflicts_with = "device", value_name = "NAME")]
     sink_name: Option<String>,
     /// Pre-fill buffer size in milliseconds (default: 50 for USB, 100 for WiFi)
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(50..=500))]
@@ -61,30 +64,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut shutdown = ShutdownSignals::new()?;
 
-    let virtual_source = match &cli.run.source_name {
-        Some(source_name) => {
-            if cli.run.device.is_some() {
-                anyhow::bail!(
-                    "--device cannot be used with --source-name; source mode writes to ALSA's pulse device"
-                )
-            }
+    let (_virtual_source, device) = match &cli.run.device {
+        Some(device) => (None, device.clone()),
+        None => (
             Some(VirtualSource::create(
-                source_name,
+                cli.run.source_name.as_deref().unwrap_or("iosmic"),
                 cli.run.sink_name.as_deref(),
                 cli.run.source_description.as_deref(),
-            )?)
-        }
-        None => None,
+            )?),
+            "pulse".to_owned(),
+        ),
     };
-    let device = virtual_source.as_ref().map_or_else(
-        || {
-            cli.run
-                .device
-                .clone()
-                .unwrap_or_else(|| "default".to_owned())
-        },
-        |_| "pulse".to_owned(),
-    );
 
     let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
     let play_policy = PlayPolicy {
@@ -172,5 +162,29 @@ async fn connect(conn: &ConnArgs) -> Result<Stream> {
         {
             anyhow::bail!("USB support not compiled in (enable the `usb` feature)")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Parser};
+
+    #[test]
+    fn device_conflicts_with_source_configuration() {
+        assert!(
+            Cli::try_parse_from([
+                "iosmic",
+                "--device",
+                "hw:0,0",
+                "--source-description",
+                "iOS Microphone",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_configuration_does_not_require_a_custom_source_name() {
+        assert!(Cli::try_parse_from(["iosmic", "--source-description", "Office iPhone"]).is_ok());
     }
 }
