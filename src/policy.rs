@@ -1,243 +1,213 @@
+use std::time::Duration;
+
 use anyhow::Result;
 
-use crate::resample::AdaptiveResampler;
-use crate::sink::AudioSink;
+use crate::error::ConfigurationError;
 
-#[derive(Clone)]
+pub const REQUESTED_PERIOD: Duration = Duration::from_millis(10);
+pub const WRITE_ATTEMPT: Duration = Duration::from_millis(20);
+pub const WRITE_EXPIRY_ATTEMPTS: u32 = 3;
+pub const MAX_CORRECTION: f64 = 1.02;
+pub const MAX_GROUP_DELAY: Duration = Duration::from_micros(250);
+
+const TARGET_RANGE_MS: std::ops::RangeInclusive<u32> = 50..=500;
+const MAXIMUM_RANGE_MS: std::ops::RangeInclusive<u32> = 100..=2000;
+
+#[derive(Clone, Debug)]
 pub struct PlayPolicy {
-    pub buffer_ms: u32,
-    pub latency_reconnect_ms: u32,
+    pub target_buffer_ms: Option<u32>,
+    pub default_target_buffer_ms: u32,
+    pub maximum_buffer_ms: Option<u32>,
+    pub alsa_buffer_ms: u32,
+    pub starvation_reconnect_ms: u32,
 }
 
 impl PlayPolicy {
-    pub fn buffer_us(&self) -> u32 {
-        self.buffer_ms * 1000
-    }
-}
+    pub fn derive_limits(
+        &self,
+        source_rate: u32,
+        largest_packet_frames: usize,
+        actual_period: Duration,
+    ) -> Result<BufferLimits> {
+        let period_source_frames = duration_to_frames_ceil(actual_period, source_rate);
+        let default_target_frames =
+            milliseconds_to_frames(self.default_target_buffer_ms, source_rate);
 
-pub struct PolicyState<S> {
-    sink: S,
-    prefill_buf: Vec<f32>,
-    prefilled: bool,
-    buffer_samples: u32,
-    latency_reconnect_samples: i64,
-    resampler: AdaptiveResampler,
-}
+        let target_frames = if let Some(milliseconds) = self.target_buffer_ms {
+            let frames = milliseconds_to_frames(milliseconds, source_rate);
+            if frames < largest_packet_frames + period_source_frames {
+                return Err(ConfigurationError::new(format!(
+                    "--buffer={milliseconds} ms has no packet headroom: need at least {:.3} ms for {largest_packet_frames} decoded frames plus one render period",
+                    frames_to_milliseconds(largest_packet_frames + period_source_frames, source_rate),
+                ))
+                .into());
+            }
+            frames
+        } else {
+            default_target_frames.max(largest_packet_frames + period_source_frames)
+        };
 
-impl<S: AudioSink> PolicyState<S> {
-    pub fn new(policy: &PlayPolicy, sample_rate: u32, chunk_size: usize, sink: S) -> Result<Self> {
-        let buffer_samples = (sample_rate as u64 * policy.buffer_ms as u64 / 1000) as u32;
-        let latency_reconnect_samples =
-            (sample_rate as u64 * policy.latency_reconnect_ms as u64 / 1000) as i64;
-        let resampler = AdaptiveResampler::new(chunk_size, buffer_samples)?;
-        Ok(Self {
-            sink,
-            prefill_buf: Vec::new(),
-            prefilled: false,
-            buffer_samples,
-            latency_reconnect_samples,
-            resampler,
+        validate_derived_range("--buffer", target_frames, source_rate, TARGET_RANGE_MS)?;
+
+        let maximum_frames = if let Some(milliseconds) = self.maximum_buffer_ms {
+            let frames = milliseconds_to_frames(milliseconds, source_rate);
+            if frames < target_frames + largest_packet_frames + period_source_frames {
+                return Err(ConfigurationError::new(format!(
+                    "--max-buffer={milliseconds} ms has no jitter headroom: need at least {:.3} ms",
+                    frames_to_milliseconds(
+                        target_frames + largest_packet_frames + period_source_frames,
+                        source_rate,
+                    ),
+                ))
+                .into());
+            }
+            frames
+        } else {
+            (2 * target_frames).max(
+                target_frames
+                    .saturating_add(largest_packet_frames)
+                    .saturating_add(period_source_frames),
+            )
+        };
+
+        validate_derived_range(
+            "--max-buffer",
+            maximum_frames,
+            source_rate,
+            MAXIMUM_RANGE_MS,
+        )?;
+
+        let maximum_duration = frames_to_duration(maximum_frames, source_rate);
+        let write_allowance = WRITE_ATTEMPT * WRITE_EXPIRY_ATTEMPTS;
+        let maximum_age =
+            maximum_duration.mul_f64(MAX_CORRECTION) + write_allowance + MAX_GROUP_DELAY;
+        let maximum_age_periods =
+            (maximum_age.as_nanos() / actual_period.as_nanos()).min(u64::MAX as u128) as u64;
+
+        Ok(BufferLimits {
+            target_frames,
+            maximum_frames,
+            largest_packet_frames,
+            maximum_age_periods,
+            submission_bound: maximum_age + actual_period,
         })
     }
 
-    /// Write samples through the playback pipeline. Returns the current delay in samples.
-    pub fn write(&mut self, samples: &[f32]) -> Result<i64> {
-        if !self.prefilled {
-            self.prefill_buf.extend_from_slice(samples);
-            if self.prefill_buf.len() >= self.buffer_samples as usize {
-                let s32: Vec<i32> = self.prefill_buf.iter().map(|&s| f32_to_s32(s)).collect();
-                self.sink.write(&s32)?;
-                self.prefill_buf = Vec::new();
-                self.prefilled = true;
-            }
-            return Ok(self.sink.delay_samples());
-        }
+    pub fn requested_alsa_buffer(&self) -> Duration {
+        Duration::from_millis(self.alsa_buffer_ms as u64)
+    }
 
-        let delay = self.sink.delay_samples();
-        if self.latency_reconnect_samples > 0 && delay > self.latency_reconnect_samples {
-            anyhow::bail!("Latency {delay} samples exceeds reconnect threshold");
-        }
-        let resampled = self.resampler.process(samples, delay)?;
-        let s32: Vec<i32> = resampled.iter().map(|&s| f32_to_s32(s)).collect();
-        self.sink.write(&s32)?;
-        Ok(delay)
+    pub fn starvation_reconnect(&self) -> Duration {
+        Duration::from_millis(self.starvation_reconnect_ms as u64)
     }
 }
 
-fn f32_to_s32(s: f32) -> i32 {
-    (s * i32::MAX as f32) as i32
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BufferLimits {
+    pub target_frames: usize,
+    pub maximum_frames: usize,
+    pub largest_packet_frames: usize,
+    pub maximum_age_periods: u64,
+    pub submission_bound: Duration,
+}
+
+pub fn milliseconds_to_frames(milliseconds: u32, rate: u32) -> usize {
+    (milliseconds as u64 * rate as u64).div_ceil(1000) as usize
+}
+
+pub fn duration_to_frames_ceil(duration: Duration, rate: u32) -> usize {
+    let numerator = duration.as_nanos().saturating_mul(rate as u128);
+    numerator.div_ceil(1_000_000_000).min(usize::MAX as u128) as usize
+}
+
+pub fn frames_to_duration(frames: usize, rate: u32) -> Duration {
+    Duration::from_secs_f64(frames as f64 / rate as f64)
+}
+
+fn frames_to_milliseconds(frames: usize, rate: u32) -> f64 {
+    frames as f64 * 1000.0 / rate as f64
+}
+
+fn validate_derived_range(
+    name: &str,
+    frames: usize,
+    rate: u32,
+    range: std::ops::RangeInclusive<u32>,
+) -> Result<()> {
+    let milliseconds = frames_to_milliseconds(frames, rate);
+    let minimum_frames = milliseconds_to_frames(*range.start(), rate);
+    let maximum_frames = milliseconds_to_frames(*range.end(), rate);
+    if !(minimum_frames..=maximum_frames).contains(&frames) {
+        return Err(ConfigurationError::new(format!(
+            "derived {name}={milliseconds:.3} ms is outside {}..={} ms",
+            range.start(),
+            range.end(),
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::sink::MockAudioSink;
-    use proptest::prelude::*;
+    use super::{PlayPolicy, REQUESTED_PERIOD};
+    use crate::error::ConfigurationError;
 
-    fn default_policy(buffer_ms: u32, latency_reconnect_ms: u32) -> PlayPolicy {
+    fn policy(target: Option<u32>, maximum: Option<u32>) -> PlayPolicy {
         PlayPolicy {
-            buffer_ms,
-            latency_reconnect_ms,
+            target_buffer_ms: target,
+            default_target_buffer_ms: 50,
+            maximum_buffer_ms: maximum,
+            alsa_buffer_ms: 40,
+            starvation_reconnect_ms: 1500,
         }
     }
 
-    // Helper: build a PolicyState with a pre-configured mock.
-    fn make_state(
-        policy: &PlayPolicy,
-        sample_rate: u32,
-        chunk_size: usize,
-        sink: MockAudioSink,
-    ) -> PolicyState<MockAudioSink> {
-        PolicyState::new(policy, sample_rate, chunk_size, sink).expect("PolicyState::new failed")
-    }
+    #[test]
+    fn derives_usb_he_aac_headroom_before_first_insert() {
+        let limits = policy(None, None)
+            .derive_limits(44_100, 2048, REQUESTED_PERIOD)
+            .unwrap();
 
-    // Helper: flush the prefill phase by writing `buffer_samples` zeros.
-    fn flush_prefill(state: &mut PolicyState<MockAudioSink>, buffer_samples: usize) {
-        let zeros = vec![0.0f32; buffer_samples];
-        state.write(&zeros).expect("prefill flush failed");
+        assert_eq!(limits.target_frames, 2048 + 441);
+        assert_eq!(limits.maximum_frames, 2 * (2048 + 441));
     }
 
     #[test]
-    fn prefill_accumulates_without_flushing_until_threshold() {
-        // buffer_ms=100, rate=1000 → buffer_samples=100
-        let policy = default_policy(100, 0);
-        let mut mock = MockAudioSink::new();
-        // sink.write must never be called during accumulation
-        mock.expect_write().times(0);
-        // delay_samples is called after the early return in prefill path
-        mock.expect_delay_samples().returning(|| 42i64);
+    fn explicit_target_requires_packet_and_period_headroom() {
+        let error = policy(Some(50), None)
+            .derive_limits(44_100, 2048, REQUESTED_PERIOD)
+            .unwrap_err();
 
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        let samples = vec![0.0f32; 50];
-        let result = state.write(&samples);
-        assert!(result.is_ok());
+        assert!(error.is::<ConfigurationError>());
+        assert!(error.to_string().contains("packet headroom"));
     }
 
     #[test]
-    fn prefill_flushes_exactly_at_threshold() {
-        // buffer_ms=100, rate=1000 → buffer_samples=100
-        let policy = default_policy(100, 0);
-        let mut mock = MockAudioSink::new();
-        // write should be called exactly once with 100 i32 values
-        mock.expect_write()
-            .times(1)
-            .withf(|data| data.len() == 100)
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples().returning(|| 42i64);
+    fn explicit_maximum_requires_jitter_headroom() {
+        let error = policy(Some(100), Some(150))
+            .derive_limits(44_100, 2048, REQUESTED_PERIOD)
+            .unwrap_err();
 
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        let samples = vec![0.0f32; 100];
-        let result = state.write(&samples);
-        assert!(result.is_ok());
+        assert!(error.is::<ConfigurationError>());
+        assert!(error.to_string().contains("jitter headroom"));
     }
 
     #[test]
-    fn prefill_flush_then_subsequent_write_goes_through_resampler() {
-        // buffer_ms=10, rate=1000 → buffer_samples=10
-        // chunk_size=1024 must match AdaptiveResampler and the post-prefill write length
-        let policy = default_policy(10, 0);
-        let mut mock = MockAudioSink::new();
-        // First call: prefill flush (10 samples); second call: resampled output
-        mock.expect_write()
-            .times(2)
-            .with(mockall::predicate::always())
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples().returning(|| 42i64);
+    fn derived_values_are_checked_against_cli_ranges() {
+        let error = policy(None, None)
+            .derive_limits(8_000, 4096, REQUESTED_PERIOD)
+            .unwrap_err();
 
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        // Flush prefill
-        flush_prefill(&mut state, 10);
-
-        // Post-prefill write: must be exactly chunk_size=1024 to match AdaptiveResampler
-        let samples = vec![0.0f32; 1024];
-        let result = state.write(&samples);
-        assert!(result.is_ok());
+        assert!(error.is::<ConfigurationError>());
+        assert!(error.to_string().contains("outside"));
     }
 
     #[test]
-    fn reconnect_threshold_zero_never_bails() {
-        // latency_reconnect_ms=0 → threshold=0 → no bail regardless of delay
-        let policy = default_policy(10, 0);
-        let mut mock = MockAudioSink::new();
-        mock.expect_write()
-            .times(2)
-            .with(mockall::predicate::always())
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples().returning(|| 999999i64);
-
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        flush_prefill(&mut state, 10);
-
-        let samples = vec![0.0f32; 1024];
-        let result = state.write(&samples);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn reconnect_threshold_exceeded_returns_error() {
-        // latency_reconnect_ms=50, rate=1000 → threshold=50; delay=51 → bail
-        let policy = default_policy(10, 50);
-        let mut mock = MockAudioSink::new();
-        // write is called once for prefill; then write is NOT called (bail before resampler)
-        mock.expect_write()
-            .times(1)
-            .with(mockall::predicate::always())
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples().returning(|| 51i64);
-
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        flush_prefill(&mut state, 10);
-
-        let samples = vec![0.0f32; 1024];
-        let result = state.write(&samples);
-        assert!(result.is_err());
-        let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("Latency"), "error message was: {msg}");
-    }
-
-    #[test]
-    fn reconnect_threshold_at_boundary_does_not_bail() {
-        // threshold=50 samples; delay=50 → condition is `delay > threshold`, so no bail
-        let policy = default_policy(10, 50);
-        let mut mock = MockAudioSink::new();
-        mock.expect_write()
-            .times(2)
-            .with(mockall::predicate::always())
-            .returning(|_| Ok(()));
-        mock.expect_delay_samples().returning(|| 50i64);
-
-        let mut state = make_state(&policy, 1000, 1024, mock);
-
-        flush_prefill(&mut state, 10);
-
-        let samples = vec![0.0f32; 1024];
-        let result = state.write(&samples);
-        assert!(result.is_ok());
-    }
-
-    proptest! {
-        #[test]
-        fn write_does_not_panic_for_arbitrary_samples(
-            raw in prop::collection::vec(-1.0f32..=1.0f32, 1024)
-        ) {
-            let policy = default_policy(10, 0);
-            let mut mock = MockAudioSink::new();
-            mock.expect_write()
-                .with(mockall::predicate::always())
-                .returning(|_| Ok(()));
-            mock.expect_delay_samples().returning(|| 42i64);
-
-            let mut state = make_state(&policy, 1000, 1024, mock);
-
-            flush_prefill(&mut state, 10);
-
-            let result = state.write(&raw);
-            prop_assert!(result.is_ok());
-        }
+    fn upper_cli_bound_allows_one_frame_of_duration_quantization() {
+        let limits = policy(Some(500), Some(2000))
+            .derive_limits(11_025, 1024, REQUESTED_PERIOD)
+            .unwrap();
+        assert_eq!(limits.target_frames, 5513);
     }
 }

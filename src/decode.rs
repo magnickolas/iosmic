@@ -8,13 +8,20 @@ use symphonia::core::units::{Duration, Timestamp};
 
 pub struct AacDecoder {
     decoder: Box<dyn AudioDecoder>,
-    sample_rate: u32,
-    channels: usize,
+    next_timestamp: i64,
+}
+
+#[derive(Debug)]
+pub struct DecodedAudio {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub channels: usize,
+    pub frames: usize,
 }
 
 impl AacDecoder {
     pub fn new(config_data: &[u8]) -> Result<Self> {
-        let (sample_rate, channels) = parse_aac_config(config_data)?;
+        let (sample_rate, _channels) = parse_aac_config(config_data)?;
 
         let mut codec_params = AudioCodecParameters::new();
         codec_params
@@ -28,23 +35,28 @@ impl AacDecoder {
 
         Ok(Self {
             decoder,
-            sample_rate,
-            channels,
+            next_timestamp: 0,
         })
     }
 
-    pub fn decode(&mut self, data: &[u8], pts: u64) -> Result<Vec<f32>> {
-        let packet = Packet::new(0, Timestamp::new(pts as i64), Duration::ZERO, data);
+    pub fn decode(&mut self, data: &[u8]) -> Result<DecodedAudio> {
+        let packet = Packet::new(0, Timestamp::new(self.next_timestamp), Duration::ZERO, data);
         let decoded = self.decoder.decode(&packet).context("AAC decode failed")?;
-        Ok(audio_buf_to_f32(&decoded))
-    }
+        let frames = decoded.frames();
+        let sample_rate = decoded.spec().rate();
+        let channels = decoded.spec().channels().count();
+        let samples = audio_buf_to_f32(&decoded);
+        self.next_timestamp = self
+            .next_timestamp
+            .checked_add(frames as i64)
+            .context("local decoder timestamp overflow")?;
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    pub fn channels(&self) -> usize {
-        self.channels
+        Ok(DecodedAudio {
+            samples,
+            sample_rate,
+            channels,
+            frames,
+        })
     }
 }
 

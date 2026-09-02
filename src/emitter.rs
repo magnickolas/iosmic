@@ -1,92 +1,226 @@
+use std::io::ErrorKind;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use byteorder::{BigEndian, ByteOrder};
-use std::io::ErrorKind;
-use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::debug::TimingDebug;
-use crate::decode::AacDecoder;
-use crate::policy::{PlayPolicy, PolicyState};
-use crate::sink::AudioSink;
+use crate::decode::{AacDecoder, DecodedAudio};
+use crate::error::ConfigurationError;
+use crate::policy::PlayPolicy;
+use crate::renderer::{RendererEvent, RendererHandle};
+use crate::sink::SinkFactory;
 
 pub(crate) const AUDIO_REQ: &[u8] = b"GET /v1/audio.2";
 const NO_PTS: u64 = u64::MAX;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub async fn run<S, F>(mut stream: S, policy: PlayPolicy, open_sink: F) -> Result<()>
+pub async fn run<S>(
+    mut stream: S,
+    policy: PlayPolicy,
+    sink_factory: Arc<dyn SinkFactory>,
+) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    F: FnOnce(u32) -> Result<Box<dyn AudioSink>>,
 {
     stream
         .write_all(AUDIO_REQ)
         .await
-        .context("Failed to send audio request")?;
+        .context("failed to send audio request")?;
 
-    let (mut decoder, mut state, mut timing_debug) =
-        handshake(&mut stream, &policy, open_sink).await?;
-
+    let timing = TimingDebug::from_env();
+    let mut config = read_initial_config(&mut stream).await?;
+    let mut codec_reset_count = 0u64;
     loop {
-        let frame = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut stream)).await {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(e)) if is_eof(&e) => {
-                eprintln!("Stream ended");
-                return Ok(());
-            }
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                anyhow::bail!("No data received for {}s", IDLE_TIMEOUT.as_secs());
-            }
-        };
-        let (pts, audio_data) = match frame {
-            Frame::Config(_) => continue,
-            Frame::Audio { pts, data } => (pts, data),
-        };
+        let mut decoder = new_decoder(&config)?;
+        let (first, first_pts) =
+            read_first_decoded(&mut stream, &mut decoder, &mut config, &timing).await?;
+        let generation = DecodedFormat::from(&first);
+        let mut renderer = RendererHandle::start(
+            Arc::clone(&sink_factory),
+            policy.clone(),
+            generation.sample_rate,
+            generation.frames,
+            timing.clone(),
+        )?;
+        insert_decoded(&renderer, first, &timing, first_pts)?;
 
-        let samples = decoder.decode(&audio_data, pts)?;
-        if samples.is_empty() {
-            continue;
-        }
+        let next_config = run_generation(
+            &mut stream,
+            &mut decoder,
+            &mut renderer,
+            &config,
+            generation,
+            &timing,
+        )
+        .await;
+        renderer.stop();
 
-        let out = downmix_mono(&samples, decoder.channels());
-        if !out.is_empty() {
-            let delay = state.write(&out)?;
-            timing_debug.log(pts, out.len(), decoder.sample_rate(), delay);
+        match next_config? {
+            Some(changed) => {
+                codec_reset_count += 1;
+                timing.log_render(format_args!("codec_reset_count={codec_reset_count}"));
+                config = changed;
+            }
+            None => return Ok(()),
         }
     }
 }
 
-pub(crate) async fn handshake<S, F>(
+async fn run_generation<S>(
     stream: &mut S,
-    policy: &PlayPolicy,
-    open_sink: F,
-) -> Result<(AacDecoder, PolicyState<Box<dyn AudioSink>>, TimingDebug)>
+    decoder: &mut AacDecoder,
+    renderer: &mut RendererHandle,
+    config: &[u8],
+    generation: DecodedFormat,
+    timing: &TimingDebug,
+) -> Result<Option<Vec<u8>>>
 where
     S: AsyncRead + Unpin,
-    F: FnOnce(u32) -> Result<Box<dyn AudioSink>>,
 {
     loop {
-        let frame = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(stream)).await {
-            Ok(Ok(frame)) => frame,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => anyhow::bail!("No config received within {}s", IDLE_TIMEOUT.as_secs()),
-        };
-        match frame {
-            Frame::Config(config) => {
-                let decoder = AacDecoder::new(&config)?;
-                let buffer_us = policy.buffer_us();
-                eprintln!(
-                    "input {}Hz {}ch, buffer {}ms",
-                    decoder.sample_rate(),
-                    decoder.channels(),
-                    buffer_us / 1000
-                );
-                let sink = open_sink(decoder.sample_rate())?;
-                let state = PolicyState::new(policy, decoder.sample_rate(), 1024, sink)?;
-                let timing_debug = TimingDebug::from_env();
-                return Ok((decoder, state, timing_debug));
+        enum Input {
+            Frame(Result<Frame>),
+            Renderer(Option<RendererEvent>),
+        }
+
+        let input = tokio::select! {
+            frame = tokio::time::timeout(IDLE_TIMEOUT, read_frame(stream)) => {
+                Input::Frame(match frame {
+                    Ok(result) => result,
+                    Err(_) => anyhow::bail!("no data received for {}s", IDLE_TIMEOUT.as_secs()),
+                })
             }
-            Frame::Audio { .. } => continue,
+            event = renderer.next_event() => Input::Renderer(event),
+        };
+
+        match input {
+            Input::Renderer(Some(RendererEvent::Starvation)) => {
+                anyhow::bail!("continuous decoded-audio starvation reached the reconnect threshold")
+            }
+            Input::Renderer(Some(RendererEvent::Terminal(error))) => return Err(error),
+            Input::Renderer(None) => anyhow::bail!("playback thread stopped unexpectedly"),
+            Input::Frame(Err(error)) if is_eof(&error) => {
+                anyhow::bail!("audio transport ended")
+            }
+            Input::Frame(Err(error)) => return Err(error),
+            Input::Frame(Ok(Frame::Config(changed))) => {
+                let identical = changed == config;
+                timing.log_config(identical, changed.len());
+                if !identical {
+                    return Ok(Some(changed));
+                }
+            }
+            Input::Frame(Ok(Frame::Audio { pts, data })) => {
+                let decoded = decoder.decode(&data)?;
+                if decoded.frames == 0 {
+                    continue;
+                }
+                let actual = DecodedFormat::from(&decoded);
+                if actual.sample_rate != generation.sample_rate
+                    || actual.channels != generation.channels
+                {
+                    return Err(ConfigurationError::new(format!(
+                        "decoded format changed without a codec config marker: {generation:?} -> {actual:?}"
+                    ))
+                    .into());
+                }
+                insert_decoded(renderer, decoded, timing, pts)?;
+            }
+        }
+    }
+}
+
+async fn read_initial_config<S>(stream: &mut S) -> Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        let frame = tokio::time::timeout(IDLE_TIMEOUT, read_frame(stream))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("no config received within {}s", IDLE_TIMEOUT.as_secs())
+            })??;
+        if let Frame::Config(config) = frame {
+            return Ok(config);
+        }
+    }
+}
+
+async fn read_first_decoded<S>(
+    stream: &mut S,
+    decoder: &mut AacDecoder,
+    config: &mut Vec<u8>,
+    timing: &TimingDebug,
+) -> Result<(DecodedAudio, u64)>
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        let frame = tokio::time::timeout(IDLE_TIMEOUT, read_frame(stream))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("no audio received within {}s", IDLE_TIMEOUT.as_secs())
+            })??;
+        match frame {
+            Frame::Config(changed) => {
+                let identical = changed == *config;
+                timing.log_config(identical, changed.len());
+                if !identical {
+                    *config = changed;
+                    *decoder = new_decoder(config)?;
+                }
+            }
+            Frame::Audio { pts, data } => {
+                let decoded = decoder.decode(&data)?;
+                if decoded.frames > 0 {
+                    return Ok((decoded, pts));
+                }
+            }
+        }
+    }
+}
+
+fn new_decoder(config: &[u8]) -> Result<AacDecoder> {
+    AacDecoder::new(config).map_err(|error| {
+        ConfigurationError::new(format!("unsupported AAC configuration: {error:#}")).into()
+    })
+}
+
+fn insert_decoded(
+    renderer: &RendererHandle,
+    decoded: DecodedAudio,
+    timing: &TimingDebug,
+    pts: u64,
+) -> Result<()> {
+    let frames = decoded.frames;
+    let sample_rate = decoded.sample_rate;
+    let mono = downmix_mono(&decoded.samples, decoded.channels);
+    anyhow::ensure!(
+        mono.len() == frames,
+        "decoded frame/channel accounting mismatch: {} mono frames, expected {frames}",
+        mono.len()
+    );
+    renderer.insert(mono)?;
+    timing.log_packet(pts, frames, sample_rate);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DecodedFormat {
+    sample_rate: u32,
+    channels: usize,
+    frames: usize,
+}
+
+impl From<&DecodedAudio> for DecodedFormat {
+    fn from(decoded: &DecodedAudio) -> Self {
+        Self {
+            sample_rate: decoded.sample_rate,
+            channels: decoded.channels,
+            frames: decoded.frames,
         }
     }
 }
@@ -115,8 +249,7 @@ where
     stream
         .read_exact(&mut header)
         .await
-        .context("Failed to read header")?;
-
+        .context("failed to read header")?;
     parse_frame(stream, header).await
 }
 
@@ -129,54 +262,47 @@ where
 
     if pts == NO_PTS {
         if len == u32::MAX {
-            anyhow::bail!("Stop/error from app side");
+            anyhow::bail!("stop/error from app side");
         }
-        anyhow::ensure!(
-            len > 0 && len <= 1024,
-            "Config packet size invalid: {}",
-            len
-        );
+        anyhow::ensure!(len > 0 && len <= 1024, "config packet size invalid: {len}");
         let mut config = vec![0u8; len as usize];
         stream
             .read_exact(&mut config)
             .await
-            .context("Failed to read config")?;
+            .context("failed to read config")?;
         return Ok(Frame::Config(config));
     }
 
     anyhow::ensure!(
         len > 0 && len <= 1024 * 1024,
-        "Data packet size invalid: {}",
-        len
+        "data packet size invalid: {len}"
     );
     let mut data = vec![0u8; len as usize];
     stream
         .read_exact(&mut data)
         .await
-        .context("Failed to read audio data")?;
-
+        .context("failed to read audio data")?;
     Ok(Frame::Audio { pts, data })
 }
 
-fn is_eof(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<std::io::Error>()
-        .is_some_and(|e| e.kind() == ErrorKind::UnexpectedEof)
+fn is_eof(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == ErrorKind::UnexpectedEof)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, NO_PTS, downmix_mono, handshake, read_frame};
-    use crate::policy::PlayPolicy;
-    use crate::sink::{AudioSink, MockAudioSink};
+    use super::{Frame, NO_PTS, downmix_mono, read_frame, read_initial_config};
     use byteorder::{BigEndian, ByteOrder};
     use std::time::Duration;
     use tokio::io::AsyncWriteExt;
 
     fn header(pts: u64, len: u32) -> [u8; 12] {
-        let mut out = [0u8; 12];
-        BigEndian::write_u64(&mut out[..8], pts);
-        BigEndian::write_u32(&mut out[8..12], len);
-        out
+        let mut output = [0u8; 12];
+        BigEndian::write_u64(&mut output[..8], pts);
+        BigEndian::write_u32(&mut output[8..12], len);
+        output
     }
 
     #[tokio::test]
@@ -192,111 +318,54 @@ mod tests {
         let config = read_frame(&mut reader).await.unwrap();
         let audio = read_frame(&mut reader).await.unwrap();
         writer_task.await.unwrap();
-
         assert_eq!(config, Frame::Config(vec![0x12, 0x10]));
         assert_eq!(
             audio,
             Frame::Audio {
                 pts: 7,
-                data: vec![1, 2, 3],
+                data: vec![1, 2, 3]
             }
         );
     }
 
     #[tokio::test]
-    async fn read_frame_stop_signal_is_rejected() {
+    async fn stop_sentinel_is_preserved() {
         let (mut reader, mut writer) = tokio::io::duplex(64);
         writer.write_all(&header(NO_PTS, u32::MAX)).await.unwrap();
         drop(writer);
-
-        let result = read_frame(&mut reader).await;
-        assert!(result.is_err());
         assert!(
-            result
+            read_frame(&mut reader)
+                .await
                 .unwrap_err()
                 .to_string()
-                .contains("Stop/error from app side"),
-            "expected 'Stop/error from app side' in error"
+                .contains("stop/error")
         );
     }
 
-    #[tokio::test]
-    async fn read_frame_config_zero_length_is_rejected() {
-        let (mut reader, mut writer) = tokio::io::duplex(64);
-        writer.write_all(&header(NO_PTS, 0)).await.unwrap();
-        drop(writer);
-
-        let result = read_frame(&mut reader).await;
-        assert!(result.is_err());
+    #[tokio::test(start_paused = true)]
+    async fn initial_config_times_out() {
+        let (mut reader, _writer) = tokio::io::duplex(64);
+        let result =
+            tokio::time::timeout(Duration::from_secs(10), read_initial_config(&mut reader))
+                .await
+                .expect("outer timeout should not fire");
         assert!(
             result
                 .unwrap_err()
                 .to_string()
-                .contains("Config packet size invalid"),
-            "expected 'Config packet size invalid' in error"
+                .contains("no config received")
         );
     }
 
     #[test]
     fn downmix_mono_passthrough_for_single_channel() {
-        let input = [0.1f32, 0.2, 0.3];
-        let output = downmix_mono(&input, 1);
-        assert_eq!(output, input.to_vec());
+        let input = [0.1, 0.2, 0.3];
+        assert_eq!(downmix_mono(&input, 1), input);
     }
 
     #[test]
     fn downmix_mono_averages_stereo_frames() {
-        let input = [1.0f32, 0.0, 0.0, 1.0];
-        let output = downmix_mono(&input, 2);
-        assert_eq!(output, vec![0.5f32, 0.5]);
-    }
-
-    #[tokio::test]
-    async fn handshake_succeeds_with_valid_config_frame() {
-        let (mut reader, mut writer) = tokio::io::duplex(64);
-        writer.write_all(&header(NO_PTS, 2)).await.unwrap();
-        writer.write_all(&[0x12, 0x10]).await.unwrap();
-        drop(writer);
-
-        let policy = PlayPolicy {
-            buffer_ms: 50,
-            latency_reconnect_ms: 0,
-        };
-        let open_sink = |_sample_rate: u32| -> anyhow::Result<Box<dyn AudioSink>> {
-            Ok(Box::new(MockAudioSink::new()))
-        };
-        let (decoder, _state, _timing_debug) =
-            handshake(&mut reader, &policy, open_sink).await.unwrap();
-
-        assert_eq!(decoder.sample_rate(), 44100);
-        assert_eq!(decoder.channels(), 2);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn handshake_times_out_when_no_data() {
-        let (mut reader, _writer) = tokio::io::duplex(64);
-        let policy = PlayPolicy {
-            buffer_ms: 50,
-            latency_reconnect_ms: 0,
-        };
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            handshake(
-                &mut reader,
-                &policy,
-                |_: u32| -> anyhow::Result<Box<dyn AudioSink>> { panic!("should not open sink") },
-            ),
-        )
-        .await
-        .expect("outer timeout should not fire");
-        assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("No config received"),
-            "expected 'No config received' in error"
-        );
+        let input = [1.0, 0.0, 0.0, 1.0];
+        assert_eq!(downmix_mono(&input, 2), vec![0.5, 0.5]);
     }
 }

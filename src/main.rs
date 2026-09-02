@@ -2,7 +2,10 @@ mod connection;
 mod debug;
 mod decode;
 mod emitter;
+mod error;
+mod jitter;
 mod policy;
+mod renderer;
 mod resample;
 mod sink;
 mod virtual_source;
@@ -10,8 +13,10 @@ mod virtual_source;
 use anyhow::Result;
 use clap::{Args, Parser};
 use connection::Stream;
+use error::ConfigurationError;
 use policy::PlayPolicy;
-use sink::{AlsaSink, AudioSink, MissingPulsePlugin};
+use sink::{AlsaSinkFactory, MissingPulsePlugin, SinkFactory};
+use std::sync::Arc;
 use std::time::Duration;
 use virtual_source::VirtualSource;
 
@@ -54,9 +59,15 @@ struct RunArgs {
     /// Pre-fill buffer size in milliseconds (default: 50 for USB, 100 for WiFi)
     #[arg(short, long, value_parser = clap::value_parser!(u32).range(50..=500))]
     buffer: Option<u32>,
-    /// Reconnect when latency exceeds this many milliseconds (0 = disabled)
-    #[arg(long, default_value_t = 0)]
-    latency_reconnect_threshold: u32,
+    /// Maximum decoded jitter-buffer size in milliseconds (default: derived)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=2000))]
+    max_buffer: Option<u32>,
+    /// Requested ALSA client-buffer size in milliseconds
+    #[arg(long, default_value_t = 40, value_parser = clap::value_parser!(u32).range(20..=200))]
+    alsa_buffer: u32,
+    /// Reconnect after this much continuous post-start starvation, in milliseconds
+    #[arg(long, default_value_t = 1500, value_parser = clap::value_parser!(u32).range(250..=5000))]
+    starvation_reconnect: u32,
 }
 
 #[tokio::main]
@@ -78,20 +89,21 @@ async fn main() -> Result<()> {
 
     let default_buffer = if cli.run.conn.host.is_some() { 100 } else { 50 };
     let play_policy = PlayPolicy {
-        buffer_ms: cli.run.buffer.unwrap_or(default_buffer),
-        latency_reconnect_ms: cli.run.latency_reconnect_threshold,
+        target_buffer_ms: cli.run.buffer,
+        default_target_buffer_ms: default_buffer,
+        maximum_buffer_ms: cli.run.max_buffer,
+        alsa_buffer_ms: cli.run.alsa_buffer,
+        starvation_reconnect_ms: cli.run.starvation_reconnect,
     };
+    let sink_factory: Arc<dyn SinkFactory> = Arc::new(AlsaSinkFactory::new(device));
+    let mut reconnect_count = 0u64;
+    let process_timing = debug::TimingDebug::from_env();
 
     loop {
         let result = tokio::select! {
             result = async {
                 let stream = connect(&cli.run.conn).await?;
-                let device = device.clone();
-                let buffer_us = play_policy.buffer_us();
-                emitter::run(stream, play_policy.clone(), move |sample_rate| {
-                    Ok(Box::new(AlsaSink::open(&device, sample_rate, buffer_us)?)
-                        as Box<dyn AudioSink>)
-                }).await
+                emitter::run(stream, play_policy.clone(), Arc::clone(&sink_factory)).await
             } => result,
             _ = shutdown.recv() => {
                 return Ok(());
@@ -100,10 +112,14 @@ async fn main() -> Result<()> {
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
-                if e.is::<MissingPulsePlugin>() {
+                if e.is::<MissingPulsePlugin>() || e.is::<ConfigurationError>() {
+                    process_timing.log_render("non_retryable_error_count=1");
                     return Err(e);
                 }
-                eprintln!("Disconnected: {e:#}");
+                reconnect_count += 1;
+                process_timing
+                    .log_render(format_args!("network_reconnect_count={reconnect_count}"));
+                eprintln!("Disconnected (reconnect #{reconnect_count}): {e:#}");
                 eprintln!("Reconnecting in 1s...");
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(1)) => {}
@@ -189,5 +205,38 @@ mod tests {
     #[test]
     fn source_configuration_does_not_require_a_custom_source_name() {
         assert!(Cli::try_parse_from(["iosmic", "--source-description", "Office iPhone"]).is_ok());
+    }
+
+    #[test]
+    fn latency_options_parse_at_their_documented_limits() {
+        let cli = Cli::try_parse_from([
+            "iosmic",
+            "--buffer",
+            "50",
+            "--max-buffer",
+            "100",
+            "--alsa-buffer",
+            "20",
+            "--starvation-reconnect",
+            "5000",
+        ])
+        .unwrap();
+        assert_eq!(cli.run.buffer, Some(50));
+        assert_eq!(cli.run.max_buffer, Some(100));
+        assert_eq!(cli.run.alsa_buffer, 20);
+        assert_eq!(cli.run.starvation_reconnect, 5000);
+    }
+
+    #[test]
+    fn latency_option_ranges_are_enforced() {
+        assert!(Cli::try_parse_from(["iosmic", "--buffer", "49"]).is_err());
+        assert!(Cli::try_parse_from(["iosmic", "--max-buffer", "2001"]).is_err());
+        assert!(Cli::try_parse_from(["iosmic", "--alsa-buffer", "19"]).is_err());
+        assert!(Cli::try_parse_from(["iosmic", "--starvation-reconnect", "249"]).is_err());
+    }
+
+    #[test]
+    fn obsolete_alsa_delay_threshold_is_rejected() {
+        assert!(Cli::try_parse_from(["iosmic", "--latency-reconnect-threshold", "100"]).is_err());
     }
 }
